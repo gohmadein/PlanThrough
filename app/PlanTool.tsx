@@ -296,6 +296,7 @@ export default function PlanTool() {
   const [toast, setToast] = useState("");
   const [celebrating, setCelebrating] = useState(false);
   const [today] = useState(() => dateString(new Date().getTime()));
+  const [viewportWidth, setViewportWidth] = useState(0);
   const dragRef = useRef<DragState | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
@@ -324,11 +325,19 @@ export default function PlanTool() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    const syncViewport = () => setViewportWidth(window.innerWidth);
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
+
   const selected = project.nodes.find((node) => node.id === selectedId) || null;
   const editable = canEdit(project);
   const totalRange = Math.max(DAY, parseDate(project.end) - parseDate(project.start));
   const spanDays = Math.ceil(totalRange / DAY);
-  const canvasWidth = Math.max(1500, Math.round((spanDays < 60 ? 32 : spanDays < 370 ? 8 : 3.2) * spanDays * zoom));
+  const availableWidth = Math.max(900, viewportWidth - (overviewOpen ? 270 : 0) - (selected ? 370 : 0));
+  const canvasWidth = Math.max(availableWidth, Math.round((spanDays < 60 ? 32 : spanDays < 370 ? 8 : 3.2) * spanDays * zoom));
   const rootTop = 112;
   const dateX = (date: string, left = 70, width = canvasWidth - 140, start = project.start, end = project.end) => {
     const range = Math.max(DAY, parseDate(end) - parseDate(start));
@@ -494,6 +503,24 @@ export default function PlanTool() {
     return result;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.start, project.end, canvasWidth]);
+
+  const floatingAxis = useMemo(() => {
+    const detailLevel = zoom >= 1.65 ? 2 : zoom >= 1.25 ? 1 : 0;
+    if (!detailLevel || !layout.frames.length) return { ticks, label: `项目时间 · ${spanDays > 730 ? "年" : spanDays > 180 ? "月" : spanDays > 45 ? "周" : "日"}`, frame: null as Frame | null };
+    const selectedAncestors = new Set<string>();
+    let ancestor: PlanNode | undefined = selected || undefined;
+    while (ancestor) {
+      selectedAncestors.add(ancestor.id);
+      ancestor = ancestor.parentId ? project.nodes.find((node) => node.id === ancestor?.parentId) : undefined;
+    }
+    const candidates = layout.frames
+      .filter((frame) => frame.level <= detailLevel)
+      .sort((a, b) => Number(selectedAncestors.has(b.nodeId)) - Number(selectedAncestors.has(a.nodeId)) || b.level - a.level);
+    const frame = candidates[0];
+    if (!frame) return { ticks, label: "项目时间", frame: null as Frame | null };
+    const owner = project.nodes.find((node) => node.id === frame.nodeId);
+    return { ticks: frame.ticks, label: `${frame.axisLabel} · ${owner ? displayNumber(project, owner) : "局部节点"}`, frame };
+  }, [zoom, layout, ticks, selected, project, spanDays]);
 
   const updateNode = (id: string, changes: Partial<PlanNode>) => {
     setProject((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === id ? { ...node, ...changes } : node) }));
@@ -789,6 +816,11 @@ export default function PlanTool() {
           ? <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} />
           : <button className="overview-reopen" onClick={() => setOverviewOpen(true)}>项目总览 ›</button>}
         <div className="canvas-scroll" ref={canvasRef} onPointerDown={canvasPointerDown}>
+          {project.timelineVisible && <footer className={`floating-timeline ${floatingAxis.frame ? "local" : "global"}`} style={{ width: canvasWidth }}>
+            {floatingAxis.frame && <i className="floating-scope" style={{ left: floatingAxis.frame.x, width: floatingAxis.frame.width }} />}
+            {floatingAxis.ticks.map((tick) => <span key={`${tick.x}-${tick.label}`} style={{ left: tick.x }}>{tick.label}</span>)}
+            <b>{floatingAxis.label}</b>
+          </footer>}
           <div className={`canvas ${tool !== "select" ? "tool-active" : ""}`} style={{ width: canvasWidth, height: mainHeight }}>
             {project.timelineVisible && ticks.map((tick) => <div className="time-grid" key={`${tick.x}-${tick.label}`} style={{ left: tick.x }} />)}
             {project.categories.map((category, index) => (
@@ -859,10 +891,6 @@ export default function PlanTool() {
               );
             })}
 
-            {project.timelineVisible && <footer className="timeline-axis">
-              {ticks.map((tick) => <span key={`${tick.x}-${tick.label}`} style={{ left: tick.x }}>{tick.label}</span>)}
-              <b>时间轴 · {spanDays > 730 ? "年" : spanDays > 180 ? "月" : spanDays > 45 ? "周" : "日"}</b>
-            </footer>}
             {!project.nodes.length && <div className="empty-canvas"><b>从这里开始设计项目</b><p>点击“新建节点”，再点击起点和终点之间的任意位置。</p><button onClick={(event) => { event.stopPropagation(); setTool("node"); }}>＋ 新建第一个节点</button></div>}
           </div>
         </div>

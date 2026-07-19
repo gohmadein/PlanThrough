@@ -368,3 +368,56 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.floating-timeline {
+  position: sticky;
+  top: calc(100% - 48px);
+  left: 0;
+  z-index: 31;
+  height: 48px;
+  margin-bottom: -48px;
+  overflow: hidden;
+  border-top: 1px solid #aebdd1;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 -5px 16px rgba(28, 49, 78, 0.08);
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.floating-timeline span {
+  position: absolute;
+  top: 8px;
+  z-index: 2;
+  transform: translateX(-50%);
+  color: #66738a;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.floating-timeline > b {
+  position: sticky;
+  left: calc(100vw - 190px);
+  top: 29px;
+  z-index: 3;
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #31435f;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.floating-scope {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  border-right: 1px solid rgba(47, 115, 255, 0.42);
+  border-left: 1px solid rgba(47, 115, 255, 0.42);
+  background: rgba(47, 115, 255, 0.075);
+}
+
+.floating-timeline.local {
+  border-top-color: rgba(47, 115, 255, 0.65);
+}

@@ -30,6 +30,8 @@ test("ships the workflow canvas, working panel, and project library", async () =
   assert.match(tool, /项目工作台/);
   assert.match(tool, /整体节点完成率/);
   assert.match(tool, /当前审批状态|审批/);
+  assert.match(tool, /floating-timeline/);
+  assert.match(tool, /局部时间/);
   assert.match(tool, /当前任务/);
   assert.match(library, /planthrough-projects-v2/);
   assert.match(readme, /npm install/);
