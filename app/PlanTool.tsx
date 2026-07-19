@@ -386,17 +386,23 @@ export default function PlanTool() {
       categoryCursor += requiredHeight;
       return band;
     });
-    const makeFrameTicks = (start: string, end: string, x: number, width: number, level: number) => {
-      const range = Math.max(DAY, parseDate(end) - parseDate(start));
-      const ticks = Array.from({ length: 6 }, (_, index) => {
-        const time = parseDate(start) + range * index / 5;
+    const makeFrameTicks = (start: string, end: string, level: number) => {
+      const rangeDays = Math.max(1, Math.ceil((parseDate(end) - parseDate(start)) / DAY));
+      const pixelsPerDay = (canvasWidth - 140) / Math.max(1, spanDays);
+      const targetSpacing = Math.max(18, 46 - level * 12);
+      const stepDays = Math.max(1, Math.ceil(targetSpacing / Math.max(1, pixelsPerDay)));
+      const ticks: { x: number; label: string }[] = [];
+      for (let day = 0; day <= rangeDays; day += stepDays) {
+        const time = Math.min(parseDate(end), parseDate(start) + day * DAY);
         const date = new Date(time);
-        const label = range > 370 * DAY && level === 1
-          ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
-          : `${date.getMonth() + 1}/${date.getDate()}`;
-        return { x: x + 14 + (width - 28) * index / 5, label };
-      });
-      return { ticks, axisLabel: level === 1 && range > 370 * DAY ? "局部时间 · 月" : "局部时间 · 日" };
+        ticks.push({ x: dateX(dateString(time)), label: `${date.getMonth() + 1}/${date.getDate()}` });
+      }
+      if (ticks.at(-1)?.x !== dateX(end)) {
+        const date = new Date(parseDate(end));
+        ticks.push({ x: dateX(end), label: `${date.getMonth() + 1}/${date.getDate()}` });
+      }
+      const unit = stepDays >= 28 ? "月" : stepDays >= 7 ? "周" : "日";
+      return { ticks, axisLabel: `局部时间 · ${unit}` };
     };
     const placeFrame = (parent: PlanNode, frameX: number, frameY: number, frameWidth: number, level: number) => {
       const frameHeight = measureFrame(parent.id);
@@ -407,14 +413,14 @@ export default function PlanTool() {
         bandCursor += height;
         return band;
       });
-      const frameAxis = makeFrameTicks(parent.start, parent.end, frameX, frameWidth, level);
+      const frameAxis = makeFrameTicks(parent.start, parent.end, level);
       frames.push({ nodeId: parent.id, level, x: frameX, y: frameY, width: frameWidth, height: frameHeight, bands, ...frameAxis });
       const siblings = sortedSiblings(project, parent.id);
       siblings.forEach((node) => {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
         const band = bands[catIndex];
-        const x = dateX(node.start, frameX + 12, frameWidth - 24, parent.start, parent.end);
-        const endX = dateX(node.end, frameX + 12, frameWidth - 24, parent.start, parent.end);
+        const x = dateX(node.start);
+        const endX = dateX(node.end);
         const minWidth = level === 1 ? 170 : 145;
         const width = Math.max(minWidth, endX - x);
         const categorySiblings = siblings.filter((other) => other.categoryId === node.categoryId);
@@ -429,8 +435,10 @@ export default function PlanTool() {
         if (!owner) return;
         const band = bands.find((item) => item.categoryId === node.categoryId);
         if (!band) return;
-        const nestedWidth = Math.min(frameWidth - 36, Math.max(230, owner.width * 1.25));
-        const nestedX = clamp(owner.x, frameX + 18, frameX + frameWidth - nestedWidth - 18);
+        const nestedStartX = dateX(node.start);
+        const nestedEndX = dateX(node.end);
+        const nestedWidth = Math.max(230, nestedEndX - nestedStartX + 20);
+        const nestedX = nestedStartX - 10;
         const nestedY = Math.max(owner.y + owner.height + 14, nestedCursors.get(node.categoryId) || band.y + 18);
         placeFrame(node, nestedX, nestedY, nestedWidth, level + 1);
         nestedCursors.set(node.categoryId, nestedY + measureFrame(node.id) + 18);
@@ -443,8 +451,8 @@ export default function PlanTool() {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
         const categorySiblings = siblings.filter((other) => other.categoryId === node.categoryId);
         const row = Math.max(0, categorySiblings.findIndex((other) => other.id === node.id)) % 2;
-        const x = dateX(node.start, 62, canvasWidth - 124, project.start, project.end);
-        const endX = dateX(node.end, 62, canvasWidth - 124, project.start, project.end);
+        const x = dateX(node.start);
+        const endX = dateX(node.end);
         const minWidth = 220;
         const width = Math.max(minWidth, endX - x);
         const height = 64;
@@ -452,8 +460,8 @@ export default function PlanTool() {
         const number = displayNumber(project, node);
         positions.set(node.id, { node, x, y, width, height, level: 0, number });
         if (expanded.has(node.id) && childrenOf(project, node.id).length) {
-          const frameWidth = Math.max(520, width);
-          const frameX = clamp(x, 58, canvasWidth - frameWidth - 58);
+          const frameWidth = Math.max(280, endX - x + 20);
+          const frameX = x - 10;
           const frameY = y + height + 14;
           placeFrame(node, frameX, frameY, frameWidth, 1);
         }
@@ -850,7 +858,7 @@ export default function PlanTool() {
                   const category = project.categories.find((cat) => cat.id === band.categoryId)!;
                   return <div className="frame-band" key={band.categoryId} style={{ top: band.y - frame.y, height: band.height }}><span className="frame-category" style={{ color: category.color }}><i style={{ background: category.color }} />{category.name}</span></div>;
                 })}
-                <div className="frame-timeline"><div>{frame.ticks.map((tick) => <span key={`${tick.x}-${tick.label}`} style={{ left: tick.x - frame.x }}>{tick.label}</span>)}</div><b>{frame.axisLabel}</b></div>
+                <div className="frame-timeline"><div>{frame.ticks.map((tick) => <span key={`${tick.x}-${tick.label}`} style={{ left: tick.x - frame.x - 1.5 }}>{tick.label}</span>)}</div><b>{frame.axisLabel}</b></div>
               </div>
             ))}
 
