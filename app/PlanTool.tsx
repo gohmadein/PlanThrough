@@ -292,6 +292,7 @@ export default function PlanTool() {
   const [filesOpen, setFilesOpen] = useState(false);
   const [uploadSection, setUploadSection] = useState<WorkingSection>("content");
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [approvalTooltip, setApprovalTooltip] = useState<{ x: number; y: number; nodeId: string } | null>(null);
   const [toast, setToast] = useState("");
   const [celebrating, setCelebrating] = useState(false);
   const [today] = useState(() => dateString(new Date().getTime()));
@@ -747,11 +748,21 @@ export default function PlanTool() {
 
   const nodeFiles = selected ? project.attachments.filter((file) => file.nodeId === selected.id) : [];
   const activePath = project.nodes.filter((node) => nodeTone(project, node) === "active").sort((a, b) => nodeDepth(project, a) - nodeDepth(project, b));
+  const approvalNode = approvalTooltip ? project.nodes.find((node) => node.id === approvalTooltip.nodeId) : null;
+  const showApprovalTooltip = (event: ReactPointerEvent<HTMLElement>, nodeId: string) => {
+    setApprovalTooltip({
+      nodeId,
+      x: Math.min(event.clientX + 16, window.innerWidth - 340),
+      y: Math.min(event.clientY + 16, window.innerHeight - 330),
+    });
+  };
 
   if (!ready) return <main className="loading">正在打开 PlanThrough…</main>;
 
   return (
-    <main className="plan-app">
+    <main className="plan-app" onPointerMoveCapture={(event) => {
+      if (!(event.target as HTMLElement).closest(".plan-node")) setApprovalTooltip(null);
+    }}>
       <header className="topbar">
         <button className="brand" onClick={() => setOverviewOpen((value) => !value)} aria-label="打开项目总览">
           <span className="brand-mark">P↘</span><span><b>PlanThrough</b><small>一张图，无限穿透</small></span>
@@ -829,8 +840,10 @@ export default function PlanTool() {
                   className={`plan-node level-${item.level} ${tone} ${selectedId === item.node.id ? "selected" : ""} ${linkSource === item.node.id ? "link-source" : ""}`}
                   style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
                   onClick={(event) => { event.stopPropagation(); handleNodeClick(item.node); }}
+                  onPointerEnter={(event) => showApprovalTooltip(event, item.node.id)}
                   onPointerDown={(event) => startDrag(event, item.node, "move")}
-                  onPointerMove={(event) => moveDrag(event, item.node)}
+                  onPointerMove={(event) => { moveDrag(event, item.node); showApprovalTooltip(event, item.node.id); }}
+                  onPointerLeave={() => setApprovalTooltip(null)}
                   onPointerUp={endDrag}
                 >
                   <div className="node-number">{item.number}</div>
@@ -876,6 +889,12 @@ export default function PlanTool() {
       {filesOpen && selected && <FileDialog files={nodeFiles} node={selected} onClose={() => setFilesOpen(false)} onDownload={downloadFile} onRemove={removeFile} />}
       {createOpen && <ProjectDialog onClose={() => setCreateOpen(false)} onCreate={(value) => { setProject(value); setExpanded(new Set()); setSelectedId(null); setCreateOpen(false); }} />}
       {tooltip && <div className="line-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>{tooltip.text}</div>}
+      {approvalTooltip && approvalNode && <div className="approval-tooltip" role="tooltip" style={{ left: approvalTooltip.x, top: approvalTooltip.y }}>
+        <header><div><small>{displayNumber(project, approvalNode)} · 审批流程</small><b>{approvalNode.title}</b></div><span>{approvalNode.working.approvals.filter((step) => step.status === "approved").length}/{approvalNode.working.approvals.length} 已通过</span></header>
+        <div className="approval-tooltip-steps">{approvalNode.working.approvals.map((step, index) => <section key={step.id} className={step.status}>
+          <i>{index + 1}</i><div><b>{step.name || `审批人 ${index + 1}`}</b><em>{step.status === "approved" ? "已通过" : step.status === "rejected" ? "未通过" : "待处理"}</em><p>{step.opinion.trim() || "暂无审批意见"}</p></div>
+        </section>)}</div>
+      </div>}
       {toast && <div className="toast">{toast}</div>}
       {celebrating && <div className="celebration"><div>🎉</div><b>恭喜，项目圆满完成！</b><span>每一步认真执行，都汇聚成了最终成果。</span></div>}
     </main>
