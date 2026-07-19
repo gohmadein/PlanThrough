@@ -287,8 +287,7 @@ export default function PlanTool() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [linkSource, setLinkSource] = useState<string | null>(null);
-  const [overviewOpen, setOverviewOpen] = useState(false);
-  const [legendOpen, setLegendOpen] = useState(true);
+  const [overviewOpen, setOverviewOpen] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [uploadSection, setUploadSection] = useState<WorkingSection>("content");
@@ -330,8 +329,6 @@ export default function PlanTool() {
   const spanDays = Math.ceil(totalRange / DAY);
   const canvasWidth = Math.max(1500, Math.round((spanDays < 60 ? 32 : spanDays < 370 ? 8 : 3.2) * spanDays * zoom));
   const rootTop = 112;
-  const categoryHeight = 220;
-  const baseMainHeight = Math.max(760, rootTop + project.categories.length * categoryHeight + 120);
   const dateX = (date: string, left = 70, width = canvasWidth - 140, start = project.start, end = project.end) => {
     const range = Math.max(DAY, parseDate(end) - parseDate(start));
     return left + clamp((parseDate(date) - parseDate(start)) / range, 0, 1) * width;
@@ -350,6 +347,21 @@ export default function PlanTool() {
         .reduce((sum, child) => sum + measureFrame(child.id) + 18, 0);
       return baseFrameHeight + nested;
     };
+    let categoryCursor = rootTop;
+    const rootNodes = sortedSiblings(project, null);
+    const categoryBands = project.categories.map((category) => {
+      const nodes = rootNodes.filter((node) => node.categoryId === category.id);
+      const requiredHeight = nodes.reduce((height, node, index) => {
+        const nodeBottom = 50 + (index % 2) * 70 + 64;
+        const expandedBottom = expanded.has(node.id) && childrenOf(project, node.id).length
+          ? nodeBottom + 14 + measureFrame(node.id) + 24
+          : nodeBottom + 30;
+        return Math.max(height, expandedBottom);
+      }, 220);
+      const band = { categoryId: category.id, y: categoryCursor, height: requiredHeight };
+      categoryCursor += requiredHeight;
+      return band;
+    });
     const makeFrameTicks = (start: string, end: string, x: number, width: number, level: number) => {
       const range = Math.max(DAY, parseDate(end) - parseDate(start));
       const ticks = Array.from({ length: 6 }, (_, index) => {
@@ -400,12 +412,14 @@ export default function PlanTool() {
       const siblings = sortedSiblings(project, parentId);
       siblings.forEach((node) => {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
+        const categorySiblings = siblings.filter((other) => other.categoryId === node.categoryId);
+        const row = Math.max(0, categorySiblings.findIndex((other) => other.id === node.id)) % 2;
         const x = dateX(node.start, 62, canvasWidth - 124, project.start, project.end);
         const endX = dateX(node.end, 62, canvasWidth - 124, project.start, project.end);
         const minWidth = 220;
         const width = Math.max(minWidth, endX - x);
         const height = 64;
-        const y = rootTop + catIndex * categoryHeight + 50 + (siblings.filter((other) => other.categoryId === node.categoryId && parseDate(other.start) < parseDate(node.start)).length % 2) * 70;
+        const y = categoryBands[catIndex].y + 50 + row * 70;
         const number = displayNumber(project, node);
         positions.set(node.id, { node, x, y, width, height, level: 0, number });
         if (expanded.has(node.id) && childrenOf(project, node.id).length) {
@@ -417,12 +431,13 @@ export default function PlanTool() {
       });
     };
     placeRoots();
-    const contentHeight = Math.max(baseMainHeight, ...frames.map((frame) => frame.y + frame.height), ...[...positions.values()].map((item) => item.y + item.height));
-    return { positions, frames, contentHeight };
+    const baseContentHeight = Math.max(760, categoryCursor + 120);
+    const contentHeight = Math.max(baseContentHeight, ...frames.map((frame) => frame.y + frame.height + 24), ...[...positions.values()].map((item) => item.y + item.height));
+    return { positions, frames, categoryBands, contentHeight };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, expanded, canvasWidth]);
 
-  const mainHeight = Math.max(baseMainHeight, layout.contentHeight + 70);
+  const mainHeight = layout.contentHeight + 70;
 
   const concurrency = useMemo(() => {
     const lines: { x: number; text: string }[] = [];
@@ -473,7 +488,7 @@ export default function PlanTool() {
     let scopeEnd = project.end;
     let scopeX = 70;
     let scopeWidth = canvasWidth - 140;
-    let categoryId = project.categories[clamp(Math.floor((y - rootTop) / categoryHeight), 0, project.categories.length - 1)]?.id;
+    let categoryId = layout.categoryBands.find((band) => y >= band.y && y < band.y + band.height)?.categoryId || project.categories[0]?.id;
     [...layout.frames].reverse().some((frame) => {
       if (x >= frame.x && x <= frame.x + frame.width && y >= frame.y && y <= frame.y + frame.height) {
         const parent = project.nodes.find((node) => node.id === frame.nodeId);
@@ -564,8 +579,7 @@ export default function PlanTool() {
         const band = parentFrame.bands.find((item) => pointerY >= item.y && pointerY < item.y + item.height);
         categoryId = band?.categoryId || categoryId;
       } else {
-        const index = clamp(Math.floor((pointerY - rootTop) / categoryHeight), 0, project.categories.length - 1);
-        categoryId = project.categories[index]?.id || categoryId;
+        categoryId = layout.categoryBands.find((band) => pointerY >= band.y && pointerY < band.y + band.height)?.categoryId || categoryId;
       }
     }
     updateNode(node.id, { start: dateString(start), end: dateString(end), categoryId });
@@ -742,18 +756,15 @@ export default function PlanTool() {
         <input ref={importRef} hidden type="file" accept="application/json,.json" onChange={importProject} />
       </header>
 
-      {overviewOpen && <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} />}
-
-      <section className={`workspace ${selected ? "with-editor" : ""}`}>
-        <aside className={`canvas-legend ${legendOpen ? "open" : "collapsed"}`}>
-          <button className="legend-toggle" onClick={() => setLegendOpen((value) => !value)}>{legendOpen ? "‹" : "图例 ›"}</button>
-          {legendOpen && <div><h3>图例</h3><p><i className="node-swatch root" />一级节点</p><p><i className="node-swatch child" />二级节点</p><p><i className="node-swatch grandchild" />三级节点</p><p><i className="line-swatch logic" />逻辑线</p><p><i className="line-swatch relation" />关系线</p><p><i className="line-swatch parallel" />并发时间线</p><p><i className="line-swatch today" />当前日期</p><hr /><h3>执行状态</h3><p><i className="status-dot pending" />未执行</p><p><i className="status-dot active" />当前任务</p><p><i className="status-dot completed" />已完成</p></div>}
-        </aside>
+      <section className={`workspace ${overviewOpen ? "with-overview" : ""} ${selected ? "with-editor" : ""}`}>
+        {overviewOpen
+          ? <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} />
+          : <button className="overview-reopen" onClick={() => setOverviewOpen(true)}>项目总览 ›</button>}
         <div className="canvas-scroll" ref={canvasRef} onPointerDown={canvasPointerDown}>
           <div className={`canvas ${tool !== "select" ? "tool-active" : ""}`} style={{ width: canvasWidth, height: mainHeight }}>
             {project.timelineVisible && ticks.map((tick) => <div className="time-grid" key={`${tick.x}-${tick.label}`} style={{ left: tick.x }} />)}
             {project.categories.map((category, index) => (
-              <div className="category-lane" key={category.id} style={{ top: rootTop + index * categoryHeight, height: categoryHeight }}>
+              <div className="category-lane" key={category.id} style={{ top: layout.categoryBands[index].y, height: layout.categoryBands[index].height }}>
                 <span style={{ color: category.color }}><i style={{ background: category.color }} />{category.name}</span>
               </div>
             ))}
@@ -857,12 +868,15 @@ export default function PlanTool() {
 function Overview({ project, activePath, onClose }: { project: Project; activePath: PlanNode[]; onClose: () => void }) {
   const levels = [0, 1, 2].map((level) => project.nodes.filter((node) => nodeDepth(project, node) === level));
   const rate = (nodes: PlanNode[]) => nodes.length ? Math.round(nodes.reduce((sum, node) => sum + calculatedProgress(project, node), 0) / nodes.length) : 0;
+  const current = activePath.at(-1);
+  const approval = current?.working.approvals.find((step) => step.status === "pending") || current?.working.approvals.at(-1);
+  const approvalText = !current ? "暂无" : approval ? `${approval.name} · ${approval.status === "approved" ? "已通过" : approval.status === "rejected" ? "未通过" : "待处理"}` : "未设置";
   return <aside className="overview-panel">
-    <header><b>项目总览</b><button onClick={onClose}>×</button></header>
-    <section><h3>项目规模</h3><dl><div><dt>项目周期</dt><dd>{Math.ceil((parseDate(project.end) - parseDate(project.start)) / DAY)} 天</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点</dt><dd>{nodes.length} 个</dd></div>)}</dl></section>
-    <section><h3>项目效率</h3><dl><div><dt>整体完成率</dt><dd>{rate(project.nodes)}%</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级完成率</dt><dd>{rate(nodes)}%</dd></div>)}</dl></section>
-    <section><h3>当前节点</h3>{activePath.length ? activePath.map((node) => <p key={node.id}><span>{displayNumber(project, node)}</span>{node.title}</p>) : <p className="muted">暂无执行中的节点</p>}</section>
-    <section className="legend"><h3>图例</h3><p><i className="logic" />逻辑线（控制执行）</p><p><i className="relation" />关系线（仅作关联）</p><p><i className="parallel" />并发时间线</p></section>
+    <header><b>项目工作台</b><button onClick={onClose} title="收起左侧栏">‹</button></header>
+    <section><h3>项目总览</h3><dl><div><dt>项目周期</dt><dd>{Math.ceil((parseDate(project.end) - parseDate(project.start)) / DAY)} 天</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点</dt><dd>{nodes.length} 个</dd></div>)}</dl></section>
+    <section><h3>项目效率</h3><dl><div><dt>整体节点完成率</dt><dd>{rate(project.nodes)}%</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点完成率</dt><dd>{rate(nodes)}%</dd></div>)}</dl></section>
+    <section className="current-path"><h3>当前节点</h3>{[0, 1, 2].map((level) => { const node = activePath.find((item) => nodeDepth(project, item) === level); return <p key={level}><b>{level + 1}级</b><span>{node ? `${displayNumber(project, node)} · ${node.title}` : "—"}</span></p>; })}<p><b>审批</b><span>{approvalText}</span></p></section>
+    <section className="canvas-key"><h3>图例</h3><p><i className="node-swatch root" />一级节点</p><p><i className="node-swatch child" />二级节点</p><p><i className="node-swatch grandchild" />三级节点</p><p><i className="line-swatch logic" />逻辑线（执行顺序）</p><p><i className="line-swatch relation" />关系线（仅关联）</p><p><i className="line-swatch parallel" />并发时间线</p><p><i className="line-swatch today" />当前日期线</p><hr /><p><i className="status-dot pending" />未执行</p><p><i className="status-dot active" />当前任务</p><p><i className="status-dot completed" />已完成</p></section>
   </aside>;
 }
 

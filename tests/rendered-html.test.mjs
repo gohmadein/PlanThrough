@@ -27,7 +27,9 @@ test("ships the workflow canvas, working panel, and project library", async () =
   assert.match(tool, /节点的审批流及成果提交/);
   assert.match(tool, /全部末端逻辑节点完成后才能结束项目/);
   assert.match(tool, /isPendingExecutable/);
-  assert.match(tool, /canvas-legend/);
+  assert.match(tool, /项目工作台/);
+  assert.match(tool, /整体节点完成率/);
+  assert.match(tool, /当前审批状态|审批/);
   assert.match(tool, /当前任务/);
   assert.match(library, /planthrough-projects-v2/);
   assert.match(readme, /npm install/);
