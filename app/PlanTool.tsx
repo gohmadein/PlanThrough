@@ -82,6 +82,8 @@ type DragState = {
 };
 
 const DAY = 86_400_000;
+const MIN_ZOOM = 0.6;
+const MAX_ZOOM = 5;
 const PROJECTS_KEY = "planthrough-projects-v2";
 const CURRENT_KEY = "planthrough-current-v2";
 const COLORS = ["#2f73ff", "#25a878", "#8b68e8", "#e59a24", "#df5f72", "#299bb4"];
@@ -505,7 +507,7 @@ export default function PlanTool() {
   }, [project.start, project.end, canvasWidth]);
 
   const floatingAxis = useMemo(() => {
-    const detailLevel = zoom >= 1.65 ? 2 : zoom >= 1.25 ? 1 : 0;
+    const detailLevel = zoom < 1.25 ? 0 : zoom < 1.65 ? 1 : 2 + Math.floor((zoom - 1.65) / 0.85);
     if (!detailLevel || !layout.frames.length) return { ticks, label: `项目时间 · ${spanDays > 730 ? "年" : spanDays > 180 ? "月" : spanDays > 45 ? "周" : "日"}`, frame: null as Frame | null };
     const selectedAncestors = new Set<string>();
     let ancestor: PlanNode | undefined = selected || undefined;
@@ -806,7 +808,7 @@ export default function PlanTool() {
           <button className="btn" onClick={() => importRef.current?.click()}>导入</button>
           <button className="btn" onClick={exportProject}>导出</button>
           <button className={`btn ${project.timelineVisible ? "active" : ""}`} onClick={() => setProject((current) => ({ ...current, timelineVisible: !current.timelineVisible }))}>时间线</button>
-          <button className="zoom" onClick={() => setZoom((value) => clamp(value - 0.1, 0.6, 2))}>−</button><span>{Math.round(zoom * 100)}%</span><button className="zoom" onClick={() => setZoom((value) => clamp(value + 0.1, 0.6, 2))}>＋</button>
+          <button className="zoom" disabled={zoom <= MIN_ZOOM} title="缩小（最低 60%）" onClick={() => setZoom((value) => clamp(value - (value > 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>−</button><span>{Math.round(zoom * 100)}%</span><button className="zoom" disabled={zoom >= MAX_ZOOM} title="放大（最高 500%）" onClick={() => setZoom((value) => clamp(value + (value >= 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>＋</button>
         </div>
         <input ref={importRef} hidden type="file" accept="application/json,.json" onChange={importProject} />
       </header>
