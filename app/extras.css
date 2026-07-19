@@ -1,0 +1,25 @@
+.link-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  border-bottom: 1px dashed #dbe2ec;
+  padding: 7px 0;
+  font-size: 11px;
+}
+
+.link-list button {
+  border: 0;
+  background: none;
+  color: #d83241;
+  cursor: pointer;
+}
+
+.link-list button:disabled {
+  color: #aeb6c2;
+}
+
+.link-list .muted {
+  font-size: 11px;
+  color: #7a879a;
+}
