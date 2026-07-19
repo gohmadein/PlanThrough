@@ -340,13 +340,25 @@ export default function PlanTool() {
     const FRAME_HEADER = 42;
     const BAND_HEIGHT = 116;
     const FRAME_AXIS = 40;
-    const baseFrameHeight = FRAME_HEADER + project.categories.length * BAND_HEIGHT + FRAME_AXIS;
-    const measureFrame = (nodeId: string): number => {
-      const nested = sortedSiblings(project, nodeId)
-        .filter((child) => expanded.has(child.id) && childrenOf(project, child.id).length)
-        .reduce((sum, child) => sum + measureFrame(child.id) + 18, 0);
-      return baseFrameHeight + nested;
-    };
+    function measureBand(parentId: string, categoryId: string): number {
+      const nodes = sortedSiblings(project, parentId).filter((node) => node.categoryId === categoryId);
+      let nestedCursor = 0;
+      let requiredHeight = BAND_HEIGHT;
+      nodes.forEach((node, index) => {
+        const nodeBottom = 18 + (index % 2) * 46 + 58;
+        requiredHeight = Math.max(requiredHeight, nodeBottom + 18);
+        if (!expanded.has(node.id) || !childrenOf(project, node.id).length) return;
+        const nestedTop = Math.max(nodeBottom + 14, nestedCursor);
+        nestedCursor = nestedTop + measureFrame(node.id) + 18;
+        requiredHeight = Math.max(requiredHeight, nestedCursor);
+      });
+      return requiredHeight;
+    }
+    function measureFrame(nodeId: string): number {
+      return FRAME_HEADER
+        + project.categories.reduce((height, category) => height + measureBand(nodeId, category.id), 0)
+        + FRAME_AXIS;
+    }
     let categoryCursor = rootTop;
     const rootNodes = sortedSiblings(project, null);
     const categoryBands = project.categories.map((category) => {
@@ -376,11 +388,13 @@ export default function PlanTool() {
     };
     const placeFrame = (parent: PlanNode, frameX: number, frameY: number, frameWidth: number, level: number) => {
       const frameHeight = measureFrame(parent.id);
-      const bands = project.categories.map((cat, index) => ({
-        categoryId: cat.id,
-        y: frameY + FRAME_HEADER + index * BAND_HEIGHT,
-        height: BAND_HEIGHT,
-      }));
+      let bandCursor = frameY + FRAME_HEADER;
+      const bands = project.categories.map((cat) => {
+        const height = measureBand(parent.id, cat.id);
+        const band = { categoryId: cat.id, y: bandCursor, height };
+        bandCursor += height;
+        return band;
+      });
       const frameAxis = makeFrameTicks(parent.start, parent.end, frameX, frameWidth, level);
       frames.push({ nodeId: parent.id, level, x: frameX, y: frameY, width: frameWidth, height: frameHeight, bands, ...frameAxis });
       const siblings = sortedSiblings(project, parent.id);
@@ -391,20 +405,23 @@ export default function PlanTool() {
         const endX = dateX(node.end, frameX + 12, frameWidth - 24, parent.start, parent.end);
         const minWidth = level === 1 ? 170 : 145;
         const width = Math.max(minWidth, endX - x);
-        const sameCategoryBefore = siblings.filter((other) => other.categoryId === node.categoryId && parseDate(other.start) < parseDate(node.start)).length;
-        const y = band.y + 18 + (sameCategoryBefore % 2) * 46;
+        const categorySiblings = siblings.filter((other) => other.categoryId === node.categoryId);
+        const row = Math.max(0, categorySiblings.findIndex((other) => other.id === node.id)) % 2;
+        const y = band.y + 18 + row * 46;
         positions.set(node.id, { node, x, y, width, height: 58, level, number: displayNumber(project, node) });
       });
-      let nextNestedY = frameY + FRAME_HEADER;
+      const nestedCursors = new Map<string, number>();
       siblings.forEach((node) => {
         if (!expanded.has(node.id) || !childrenOf(project, node.id).length) return;
         const owner = positions.get(node.id);
         if (!owner) return;
+        const band = bands.find((item) => item.categoryId === node.categoryId);
+        if (!band) return;
         const nestedWidth = Math.min(frameWidth - 36, Math.max(230, owner.width * 1.25));
         const nestedX = clamp(owner.x, frameX + 18, frameX + frameWidth - nestedWidth - 18);
-        const nestedY = Math.max(owner.y + owner.height + 14, nextNestedY);
+        const nestedY = Math.max(owner.y + owner.height + 14, nestedCursors.get(node.categoryId) || band.y + 18);
         placeFrame(node, nestedX, nestedY, nestedWidth, level + 1);
-        nextNestedY = nestedY + measureFrame(node.id) + 18;
+        nestedCursors.set(node.categoryId, nestedY + measureFrame(node.id) + 18);
       });
     };
     const placeRoots = () => {
