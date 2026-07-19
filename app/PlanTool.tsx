@@ -246,9 +246,27 @@ function canEdit(project: Project) {
   return project.status === "draft" || project.status === "paused";
 }
 
+function isPendingExecutable(project: Project, node: PlanNode) {
+  if (node.status !== "pending" || project.status !== "running") return false;
+  const siblings = sortedSiblings(project, node.parentId);
+  const incoming = project.links.filter((link) => link.kind === "logic" && link.to === node.id);
+  const contextActive = node.parentId
+    ? project.nodes.find((item) => item.id === node.parentId)?.status === "active"
+    : !siblings.some((item) => item.status === "active");
+  if (!contextActive) return false;
+  if (incoming.length) {
+    return incoming.every((link) => project.nodes.find((item) => item.id === link.from)?.status === "completed");
+  }
+  const entryCandidates = siblings.filter((item) => {
+    const hasIncoming = project.links.some((link) => link.kind === "logic" && link.to === item.id);
+    return !hasIncoming && item.status === "pending";
+  });
+  return entryCandidates[0]?.id === node.id;
+}
+
 function nodeTone(project: Project, node: PlanNode): NodeStatus {
   if (node.status === "completed") return "completed";
-  if (node.status === "active" || descendants(project, node.id).some((item) => item.status === "active")) return "active";
+  if (node.status === "active" || isPendingExecutable(project, node) || descendants(project, node.id).some((item) => item.status === "active" || isPendingExecutable(project, item))) return "active";
   return "pending";
 }
 
@@ -270,6 +288,7 @@ export default function PlanTool() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [linkSource, setLinkSource] = useState<string | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [uploadSection, setUploadSection] = useState<WorkingSection>("content");
@@ -364,12 +383,16 @@ export default function PlanTool() {
         const y = band.y + 18 + (sameCategoryBefore % 2) * 46;
         positions.set(node.id, { node, x, y, width, height: 58, level, number: displayNumber(project, node) });
       });
-      let nestedY = frameY + FRAME_HEADER + project.categories.length * BAND_HEIGHT + 10;
+      let nextNestedY = frameY + FRAME_HEADER;
       siblings.forEach((node) => {
         if (!expanded.has(node.id) || !childrenOf(project, node.id).length) return;
-        const nestedWidth = Math.max(360, frameWidth - 36);
-        placeFrame(node, frameX + 18, nestedY, nestedWidth, level + 1);
-        nestedY += measureFrame(node.id) + 18;
+        const owner = positions.get(node.id);
+        if (!owner) return;
+        const nestedWidth = Math.min(frameWidth - 36, Math.max(230, owner.width * 1.25));
+        const nestedX = clamp(owner.x, frameX + 18, frameX + frameWidth - nestedWidth - 18);
+        const nestedY = Math.max(owner.y + owner.height + 14, nextNestedY);
+        placeFrame(node, nestedX, nestedY, nestedWidth, level + 1);
+        nextNestedY = nestedY + measureFrame(node.id) + 18;
       });
     };
     const placeRoots = () => {
@@ -586,7 +609,7 @@ export default function PlanTool() {
   const completeNode = (id: string) => {
     setProject((current) => {
       const target = current.nodes.find((node) => node.id === id);
-      if (!target || target.status !== "active") return current;
+      if (!target || (target.status !== "active" && !isPendingExecutable(current, target))) return current;
       if (childrenOf(current, id).some((child) => child.status !== "completed")) { setToast("请先完成该节点的全部子节点"); return current; }
       let next: Project = {
         ...current,
@@ -722,6 +745,10 @@ export default function PlanTool() {
       {overviewOpen && <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} />}
 
       <section className={`workspace ${selected ? "with-editor" : ""}`}>
+        <aside className={`canvas-legend ${legendOpen ? "open" : "collapsed"}`}>
+          <button className="legend-toggle" onClick={() => setLegendOpen((value) => !value)}>{legendOpen ? "‹" : "图例 ›"}</button>
+          {legendOpen && <div><h3>图例</h3><p><i className="node-swatch root" />一级节点</p><p><i className="node-swatch child" />二级节点</p><p><i className="node-swatch grandchild" />三级节点</p><p><i className="line-swatch logic" />逻辑线</p><p><i className="line-swatch relation" />关系线</p><p><i className="line-swatch parallel" />并发时间线</p><p><i className="line-swatch today" />当前日期</p><hr /><h3>执行状态</h3><p><i className="status-dot pending" />未执行</p><p><i className="status-dot active" />当前任务</p><p><i className="status-dot completed" />已完成</p></div>}
+        </aside>
         <div className="canvas-scroll" ref={canvasRef} onPointerDown={canvasPointerDown}>
           <div className={`canvas ${tool !== "select" ? "tool-active" : ""}`} style={{ width: canvasWidth, height: mainHeight }}>
             {project.timelineVisible && ticks.map((tick) => <div className="time-grid" key={`${tick.x}-${tick.label}`} style={{ left: tick.x }} />)}
@@ -844,19 +871,20 @@ function WorkingPanel({ project, node, editable, files, expanded, onClose, onUpd
 }) {
   const working = node.working;
   const approvals = working.approvals.length >= 2 ? working.approvals : emptyWorking().approvals;
+  const effectiveStatus = nodeTone(project, node);
   const updateWorking = (changes: Partial<Working>) => onUpdate({ working: { ...working, ...changes } });
   const parent = node.parentId ? project.nodes.find((item) => item.id === node.parentId) : null;
   const locked = !editable;
   const setTeam = (id: string, changes: Partial<TeamMember>) => updateWorking({ team: working.team.map((member) => member.id === id ? { ...member, ...changes } : member) });
   const setApproval = (id: string, changes: Partial<ApprovalStep>) => updateWorking({ approvals: approvals.map((step) => step.id === id ? { ...step, ...changes } : step) });
-  const completionReason = node.status !== "active"
+  const completionReason = effectiveStatus !== "active"
     ? "项目启动并按逻辑线执行到本节点后，才能点击验收通过。"
     : !working.content.trim()
       ? "请先填写必填的“节点执行内容”，再进行验收。"
       : "";
   return <aside className="working-panel">
     <header><div><small>{displayNumber(project, node)} · Working</small><h2>{node.title}</h2></div><button onClick={onClose}>×</button></header>
-    <div className={`working-status ${nodeTone(project, node)}`}><span>{node.status === "active" ? "当前执行节点" : node.status === "completed" ? "节点已完成" : "节点尚未执行"}</span><b>{calculatedProgress(project, node)}%</b></div>
+    <div className={`working-status ${effectiveStatus}`}><span>{effectiveStatus === "active" ? "当前执行节点" : effectiveStatus === "completed" ? "节点已完成" : "节点尚未执行"}</span><b>{calculatedProgress(project, node)}%</b></div>
     <label>节点名称<input value={node.title} disabled={locked} onChange={(event) => onUpdate({ title: event.target.value })} /></label>
     <div className="form-row"><label>事件分类<select value={node.categoryId} disabled={locked} onChange={(event) => onUpdate({ categoryId: event.target.value })}>{project.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>归并权重<input type="number" min="0.1" step="0.1" disabled={locked} value={node.weight} onChange={(event) => onUpdate({ weight: Number(event.target.value) || 1 })} /></label></div>
     <div className="form-row"><label>开始时间<input type="date" value={node.start} disabled={locked} min={parent?.start || project.start} max={node.end} onChange={(event) => onUpdate({ start: event.target.value })} /></label><label>完成时间<input type="date" value={node.end} disabled={locked} min={node.start} max={parent?.end || project.end} onChange={(event) => onUpdate({ end: event.target.value })} /></label></div>
@@ -870,7 +898,7 @@ function WorkingPanel({ project, node, editable, files, expanded, onClose, onUpd
 
     <section className="working-section"><h3>六、节点的审批流及成果提交 <em>*</em></h3>{approvals.map((step, index) => { const isFirst = index === 0; const isLast = index === approvals.length - 1; const fixedName = isFirst ? "发起人" : isLast ? "验收人" : step.name; return <div className="approval-step" key={step.id}><b>步骤 {index + 1}</b><input value={fixedName} disabled={isFirst || isLast} onChange={(event) => setApproval(step.id, { name: event.target.value })} /><select value={step.status} onChange={(event) => setApproval(step.id, { status: event.target.value as ApprovalStep["status"] })}><option value="pending">待处理</option><option value="approved">通过</option><option value="rejected">不通过</option></select><textarea placeholder="审批意见" value={step.opinion} onChange={(event) => setApproval(step.id, { opinion: event.target.value })} /></div>; })}<button className="text-button" onClick={() => { const last = approvals[approvals.length - 1]; const middle = approvals.slice(0, -1); updateWorking({ approvals: [...middle, { id: uid(), name: `审批人 ${middle.length}`, opinion: "", status: "pending" }, { ...last, name: "验收人" }] }); }}>＋ 添加中间审批步骤</button><button className="text-button" onClick={() => onUpload("approval")}>上传审批附件</button><button className="text-button" onClick={onFiles}>查看全部附件（{files.length}）</button></section>
 
-    <section className="working-section"><h3>七、节点的执行结果 <em>*</em></h3><textarea placeholder="填写成果说明、未通过原因或修改建议" value={working.resultNote} onChange={(event) => updateWorking({ resultNote: event.target.value })} /><div className="result-actions"><button className="reject" disabled={node.status !== "active"} onClick={() => updateWorking({ resultStatus: "rejected" })}>不通过</button><button className="approve" disabled={Boolean(completionReason)} onClick={onComplete}>验收通过并进入下一节点</button></div>{completionReason && <small className="approval-help">{completionReason}</small>}</section>
+    <section className="working-section"><h3>七、节点的执行结果 <em>*</em></h3><textarea placeholder="填写成果说明、未通过原因或修改建议" value={working.resultNote} onChange={(event) => updateWorking({ resultNote: event.target.value })} /><div className="result-actions"><button className="reject" disabled={effectiveStatus !== "active"} onClick={() => updateWorking({ resultStatus: "rejected" })}>不通过</button><button className="approve" disabled={Boolean(completionReason)} onClick={onComplete}>验收通过并进入下一节点</button></div>{completionReason && <small className="approval-help">{completionReason}</small>}</section>
 
     <section className="working-section"><h3>八、节点连接关系</h3><div className="link-list">{project.links.filter((link) => link.from === node.id || link.to === node.id).map((link) => { const otherId = link.from === node.id ? link.to : link.from; const other = project.nodes.find((item) => item.id === otherId); return <div key={link.id}><span>{link.kind === "logic" ? "逻辑线" : "关系线"} · {link.from === node.id ? "指向" : "来自"} {other?.title || "未知节点"}</span><button disabled={!editable} onClick={() => onDeleteLink(link.id)}>删除</button></div>; })}{!project.links.some((link) => link.from === node.id || link.to === node.id) && <p className="muted">尚未建立连接。请使用画布顶部的逻辑线或关系线工具。</p>}</div></section>
 
