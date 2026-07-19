@@ -808,7 +808,12 @@ export default function PlanTool() {
           <button className="btn" onClick={() => importRef.current?.click()}>导入</button>
           <button className="btn" onClick={exportProject}>导出</button>
           <button className={`btn ${project.timelineVisible ? "active" : ""}`} onClick={() => setProject((current) => ({ ...current, timelineVisible: !current.timelineVisible }))}>时间线</button>
-          <button className="zoom" disabled={zoom <= MIN_ZOOM} title="缩小（最低 60%）" onClick={() => setZoom((value) => clamp(value - (value > 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>−</button><span>{Math.round(zoom * 100)}%</span><button className="zoom" disabled={zoom >= MAX_ZOOM} title="放大（最高 500%）" onClick={() => setZoom((value) => clamp(value + (value >= 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>＋</button>
+          <button className="zoom" disabled={zoom <= MIN_ZOOM} title="缩小（最低 60%）" onClick={() => setZoom((value) => clamp(value - (value > 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>−</button>
+          <label className="zoom-slider" title={`当前缩放 ${Math.round(zoom * 100)}%`}>
+            <input aria-label="画布缩放" type="range" min={MIN_ZOOM * 100} max={MAX_ZOOM * 100} step="5" value={Math.round(zoom * 100)} onInput={(event) => setZoom(Number(event.currentTarget.value) / 100)} onChange={(event) => setZoom(Number(event.currentTarget.value) / 100)} />
+            <span>{Math.round(zoom * 100)}%</span>
+          </label>
+          <button className="zoom" disabled={zoom >= MAX_ZOOM} title="放大（最高 500%）" onClick={() => setZoom((value) => clamp(value + (value >= 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>＋</button>
         </div>
         <input ref={importRef} hidden type="file" accept="application/json,.json" onChange={importProject} />
       </header>
