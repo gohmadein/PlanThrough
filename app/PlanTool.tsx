@@ -66,7 +66,13 @@ type Project = {
 };
 type Rect = { x: number; y: number; width: number; height: number };
 type Positioned = Rect & { node: PlanNode; level: number; number: string };
-type Frame = Rect & { nodeId: string; level: number; bands: { categoryId: string; y: number; height: number }[] };
+type Frame = Rect & {
+  nodeId: string;
+  level: number;
+  bands: { categoryId: string; y: number; height: number }[];
+  ticks: { x: number; label: string }[];
+  axisLabel: string;
+};
 type DragState = {
   id: string;
   kind: "move" | "start" | "end";
@@ -306,7 +312,7 @@ export default function PlanTool() {
   const canvasWidth = Math.max(1500, Math.round((spanDays < 60 ? 32 : spanDays < 370 ? 8 : 3.2) * spanDays * zoom));
   const rootTop = 112;
   const categoryHeight = 220;
-  const mainHeight = Math.max(760, rootTop + project.categories.length * categoryHeight + 120);
+  const baseMainHeight = Math.max(760, rootTop + project.categories.length * categoryHeight + 120);
   const dateX = (date: string, left = 70, width = canvasWidth - 140, start = project.start, end = project.end) => {
     const range = Math.max(DAY, parseDate(end) - parseDate(start));
     return left + clamp((parseDate(date) - parseDate(start)) / range, 0, 1) * width;
@@ -315,33 +321,85 @@ export default function PlanTool() {
   const layout = useMemo(() => {
     const positions = new Map<string, Positioned>();
     const frames: Frame[] = [];
-    const placeChildren = (parentId: string | null, scope: Rect, level: number, scopeStart: string, scopeEnd: string) => {
+    const FRAME_HEADER = 42;
+    const BAND_HEIGHT = 116;
+    const FRAME_AXIS = 40;
+    const baseFrameHeight = FRAME_HEADER + project.categories.length * BAND_HEIGHT + FRAME_AXIS;
+    const measureFrame = (nodeId: string): number => {
+      const nested = sortedSiblings(project, nodeId)
+        .filter((child) => expanded.has(child.id) && childrenOf(project, child.id).length)
+        .reduce((sum, child) => sum + measureFrame(child.id) + 18, 0);
+      return baseFrameHeight + nested;
+    };
+    const makeFrameTicks = (start: string, end: string, x: number, width: number, level: number) => {
+      const range = Math.max(DAY, parseDate(end) - parseDate(start));
+      const ticks = Array.from({ length: 6 }, (_, index) => {
+        const time = parseDate(start) + range * index / 5;
+        const date = new Date(time);
+        const label = range > 370 * DAY && level === 1
+          ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
+          : `${date.getMonth() + 1}/${date.getDate()}`;
+        return { x: x + 14 + (width - 28) * index / 5, label };
+      });
+      return { ticks, axisLabel: level === 1 && range > 370 * DAY ? "局部时间 · 月" : "局部时间 · 日" };
+    };
+    const placeFrame = (parent: PlanNode, frameX: number, frameY: number, frameWidth: number, level: number) => {
+      const frameHeight = measureFrame(parent.id);
+      const bands = project.categories.map((cat, index) => ({
+        categoryId: cat.id,
+        y: frameY + FRAME_HEADER + index * BAND_HEIGHT,
+        height: BAND_HEIGHT,
+      }));
+      const frameAxis = makeFrameTicks(parent.start, parent.end, frameX, frameWidth, level);
+      frames.push({ nodeId: parent.id, level, x: frameX, y: frameY, width: frameWidth, height: frameHeight, bands, ...frameAxis });
+      const siblings = sortedSiblings(project, parent.id);
+      siblings.forEach((node) => {
+        const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
+        const band = bands[catIndex];
+        const x = dateX(node.start, frameX + 12, frameWidth - 24, parent.start, parent.end);
+        const endX = dateX(node.end, frameX + 12, frameWidth - 24, parent.start, parent.end);
+        const minWidth = level === 1 ? 170 : 145;
+        const width = Math.max(minWidth, endX - x);
+        const sameCategoryBefore = siblings.filter((other) => other.categoryId === node.categoryId && parseDate(other.start) < parseDate(node.start)).length;
+        const y = band.y + 18 + (sameCategoryBefore % 2) * 46;
+        positions.set(node.id, { node, x, y, width, height: 58, level, number: displayNumber(project, node) });
+      });
+      let nestedY = frameY + FRAME_HEADER + project.categories.length * BAND_HEIGHT + 10;
+      siblings.forEach((node) => {
+        if (!expanded.has(node.id) || !childrenOf(project, node.id).length) return;
+        const nestedWidth = Math.max(360, frameWidth - 36);
+        placeFrame(node, frameX + 18, nestedY, nestedWidth, level + 1);
+        nestedY += measureFrame(node.id) + 18;
+      });
+    };
+    const placeRoots = () => {
+      const parentId: string | null = null;
       const siblings = sortedSiblings(project, parentId);
       siblings.forEach((node) => {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
-        const x = dateX(node.start, scope.x + 12, scope.width - 24, scopeStart, scopeEnd);
-        const endX = dateX(node.end, scope.x + 12, scope.width - 24, scopeStart, scopeEnd);
-        const minWidth = level === 0 ? 220 : level === 1 ? 170 : 145;
+        const x = dateX(node.start, 62, canvasWidth - 124, project.start, project.end);
+        const endX = dateX(node.end, 62, canvasWidth - 124, project.start, project.end);
+        const minWidth = 220;
         const width = Math.max(minWidth, endX - x);
-        const height = level === 0 ? 64 : 58;
-        const y = scope.y + 42 + catIndex * (scope.height - 64) / Math.max(1, project.categories.length) + (siblings.filter((other) => other.categoryId === node.categoryId && parseDate(other.start) < parseDate(node.start)).length % 2) * 70;
+        const height = 64;
+        const y = rootTop + catIndex * categoryHeight + 50 + (siblings.filter((other) => other.categoryId === node.categoryId && parseDate(other.start) < parseDate(node.start)).length % 2) * 70;
         const number = displayNumber(project, node);
-        positions.set(node.id, { node, x, y, width, height, level, number });
+        positions.set(node.id, { node, x, y, width, height, level: 0, number });
         if (expanded.has(node.id) && childrenOf(project, node.id).length) {
           const frameWidth = Math.max(520, width);
-          const frameHeight = 82 + project.categories.length * 116;
-          const frameX = clamp(x, scope.x + 8, scope.x + scope.width - frameWidth - 8);
+          const frameX = clamp(x, 58, canvasWidth - frameWidth - 58);
           const frameY = y + height + 14;
-          const bands = project.categories.map((cat, index) => ({ categoryId: cat.id, y: frameY + 42 + index * 116, height: 116 }));
-          frames.push({ nodeId: node.id, level: level + 1, x: frameX, y: frameY, width: frameWidth, height: frameHeight, bands });
-          placeChildren(node.id, { x: frameX, y: frameY, width: frameWidth, height: frameHeight }, level + 1, node.start, node.end);
+          placeFrame(node, frameX, frameY, frameWidth, 1);
         }
       });
     };
-    placeChildren(null, { x: 50, y: 70, width: canvasWidth - 100, height: project.categories.length * categoryHeight }, 0, project.start, project.end);
-    return { positions, frames };
+    placeRoots();
+    const contentHeight = Math.max(baseMainHeight, ...frames.map((frame) => frame.y + frame.height), ...[...positions.values()].map((item) => item.y + item.height));
+    return { positions, frames, contentHeight };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, expanded, canvasWidth]);
+
+  const mainHeight = Math.max(baseMainHeight, layout.contentHeight + 70);
 
   const concurrency = useMemo(() => {
     const lines: { x: number; text: string }[] = [];
@@ -461,7 +519,10 @@ export default function PlanTool() {
     const parent = node.parentId ? project.nodes.find((item) => item.id === node.parentId) : null;
     const scopeStart = parent?.start || project.start;
     const scopeEnd = parent?.end || project.end;
-    const daysDelta = Math.round((event.clientX - drag.startX) / Math.max(2, canvasWidth - 140) * (totalRange / DAY));
+    const parentFrame = parent ? layout.frames.find((frame) => frame.nodeId === parent.id) : null;
+    const scopePixelWidth = parentFrame ? parentFrame.width - 24 : canvasWidth - 140;
+    const scopeDays = Math.max(1, (parseDate(scopeEnd) - parseDate(scopeStart)) / DAY);
+    const daysDelta = Math.round((event.clientX - drag.startX) / Math.max(2, scopePixelWidth) * scopeDays);
     const originalDuration = parseDate(drag.original.end) - parseDate(drag.original.start);
     let start = parseDate(drag.original.start);
     let end = parseDate(drag.original.end);
@@ -473,11 +534,14 @@ export default function PlanTool() {
     } else if (drag.kind === "start") start = clamp(start + daysDelta * DAY, parseDate(scopeStart), end - DAY);
     else end = clamp(end + daysDelta * DAY, start + DAY, parseDate(scopeEnd));
     let categoryId = node.categoryId;
-    if (drag.kind === "move") {
-      const pos = layout.positions.get(node.id);
-      if (pos) {
-        const nextY = pos.y + event.clientY - drag.startY;
-        const index = clamp(Math.round((nextY - rootTop - 42) / categoryHeight), 0, project.categories.length - 1);
+    if (drag.kind === "move" && canvasRef.current) {
+      const canvasRect = canvasRef.current.getBoundingClientRect();
+      const pointerY = event.clientY - canvasRect.top + canvasRef.current.scrollTop;
+      if (parentFrame) {
+        const band = parentFrame.bands.find((item) => pointerY >= item.y && pointerY < item.y + item.height);
+        categoryId = band?.categoryId || categoryId;
+      } else {
+        const index = clamp(Math.floor((pointerY - rootTop) / categoryHeight), 0, project.categories.length - 1);
         categoryId = project.categories[index]?.id || categoryId;
       }
     }
@@ -679,8 +743,9 @@ export default function PlanTool() {
                 <b>{project.nodes.find((node) => node.id === frame.nodeId)?.title} · 下级任务</b>
                 {frame.bands.map((band) => {
                   const category = project.categories.find((cat) => cat.id === band.categoryId)!;
-                  return <span className="frame-category" key={band.categoryId} style={{ top: band.y - frame.y, color: category.color }}><i style={{ background: category.color }} />{category.name}</span>;
+                  return <div className="frame-band" key={band.categoryId} style={{ top: band.y - frame.y, height: band.height }}><span className="frame-category" style={{ color: category.color }}><i style={{ background: category.color }} />{category.name}</span></div>;
                 })}
+                <div className="frame-timeline"><div>{frame.ticks.map((tick) => <span key={`${tick.x}-${tick.label}`} style={{ left: tick.x - frame.x }}>{tick.label}</span>)}</div><b>{frame.axisLabel}</b></div>
               </div>
             ))}
 
@@ -739,6 +804,7 @@ export default function PlanTool() {
           node={selected}
           editable={editable}
           files={nodeFiles}
+          expanded={expanded.has(selected.id)}
           onClose={() => setSelectedId(null)}
           onUpdate={(changes) => updateNode(selected.id, changes)}
           onProjectChange={setProject}
@@ -747,6 +813,7 @@ export default function PlanTool() {
           onDeleteLink={(id) => setProject((current) => ({ ...current, links: current.links.filter((link) => link.id !== id) }))}
           onUpload={(section) => { setUploadSection(section); uploadRef.current?.click(); }}
           onFiles={() => setFilesOpen(true)}
+          onToggleExpanded={() => setExpanded((current) => { const next = new Set(current); if (next.has(selected.id)) next.delete(selected.id); else next.add(selected.id); return next; })}
         />}
       </section>
 
@@ -772,15 +839,21 @@ function Overview({ project, activePath, onClose }: { project: Project; activePa
   </aside>;
 }
 
-function WorkingPanel({ project, node, editable, files, onClose, onUpdate, onProjectChange, onComplete, onDelete, onDeleteLink, onUpload, onFiles }: {
-  project: Project; node: PlanNode; editable: boolean; files: AttachmentMeta[]; onClose: () => void; onUpdate: (changes: Partial<PlanNode>) => void; onProjectChange: (value: Project | ((current: Project) => Project)) => void; onComplete: () => void; onDelete: () => void; onDeleteLink: (id: string) => void; onUpload: (section: WorkingSection) => void; onFiles: () => void;
+function WorkingPanel({ project, node, editable, files, expanded, onClose, onUpdate, onProjectChange, onComplete, onDelete, onDeleteLink, onUpload, onFiles, onToggleExpanded }: {
+  project: Project; node: PlanNode; editable: boolean; files: AttachmentMeta[]; expanded: boolean; onClose: () => void; onUpdate: (changes: Partial<PlanNode>) => void; onProjectChange: (value: Project | ((current: Project) => Project)) => void; onComplete: () => void; onDelete: () => void; onDeleteLink: (id: string) => void; onUpload: (section: WorkingSection) => void; onFiles: () => void; onToggleExpanded: () => void;
 }) {
   const working = node.working;
+  const approvals = working.approvals.length >= 2 ? working.approvals : emptyWorking().approvals;
   const updateWorking = (changes: Partial<Working>) => onUpdate({ working: { ...working, ...changes } });
   const parent = node.parentId ? project.nodes.find((item) => item.id === node.parentId) : null;
   const locked = !editable;
   const setTeam = (id: string, changes: Partial<TeamMember>) => updateWorking({ team: working.team.map((member) => member.id === id ? { ...member, ...changes } : member) });
-  const setApproval = (id: string, changes: Partial<ApprovalStep>) => updateWorking({ approvals: working.approvals.map((step) => step.id === id ? { ...step, ...changes } : step) });
+  const setApproval = (id: string, changes: Partial<ApprovalStep>) => updateWorking({ approvals: approvals.map((step) => step.id === id ? { ...step, ...changes } : step) });
+  const completionReason = node.status !== "active"
+    ? "项目启动并按逻辑线执行到本节点后，才能点击验收通过。"
+    : !working.content.trim()
+      ? "请先填写必填的“节点执行内容”，再进行验收。"
+      : "";
   return <aside className="working-panel">
     <header><div><small>{displayNumber(project, node)} · Working</small><h2>{node.title}</h2></div><button onClick={onClose}>×</button></header>
     <div className={`working-status ${nodeTone(project, node)}`}><span>{node.status === "active" ? "当前执行节点" : node.status === "completed" ? "节点已完成" : "节点尚未执行"}</span><b>{calculatedProgress(project, node)}%</b></div>
@@ -795,13 +868,13 @@ function WorkingPanel({ project, node, editable, files, onClose, onUpdate, onPro
 
     <section className="working-section"><h3>四、节点的执行团队</h3>{working.team.map((member) => <div className="team-row" key={member.id}><input placeholder="姓名" value={member.name} onChange={(event) => setTeam(member.id, { name: event.target.value })} /><input placeholder="身份" value={member.role} onChange={(event) => setTeam(member.id, { role: event.target.value })} /><input placeholder="职责" value={member.duty} onChange={(event) => setTeam(member.id, { duty: event.target.value })} /><input placeholder="任务拆解" value={member.breakdown} onChange={(event) => setTeam(member.id, { breakdown: event.target.value })} /></div>)}<button className="text-button" onClick={() => updateWorking({ team: [...working.team, { id: uid(), name: "", role: "", duty: "", breakdown: "" }] })}>＋ 添加成员</button></section>
 
-    <section className="working-section"><h3>六、节点的审批流及成果提交 <em>*</em></h3>{working.approvals.map((step, index) => <div className="approval-step" key={step.id}><b>步骤 {index + 1}</b><input value={step.name} onChange={(event) => setApproval(step.id, { name: event.target.value })} /><select value={step.status} onChange={(event) => setApproval(step.id, { status: event.target.value as ApprovalStep["status"] })}><option value="pending">待处理</option><option value="approved">通过</option><option value="rejected">不通过</option></select><textarea placeholder="审批意见" value={step.opinion} onChange={(event) => setApproval(step.id, { opinion: event.target.value })} /></div>)}<button className="text-button" onClick={() => updateWorking({ approvals: [...working.approvals, { id: uid(), name: `审批人 ${working.approvals.length}`, opinion: "", status: "pending" }] })}>＋ 添加审批步骤</button><button className="text-button" onClick={() => onUpload("approval")}>上传审批附件</button></section>
+    <section className="working-section"><h3>六、节点的审批流及成果提交 <em>*</em></h3>{approvals.map((step, index) => { const isFirst = index === 0; const isLast = index === approvals.length - 1; const fixedName = isFirst ? "发起人" : isLast ? "验收人" : step.name; return <div className="approval-step" key={step.id}><b>步骤 {index + 1}</b><input value={fixedName} disabled={isFirst || isLast} onChange={(event) => setApproval(step.id, { name: event.target.value })} /><select value={step.status} onChange={(event) => setApproval(step.id, { status: event.target.value as ApprovalStep["status"] })}><option value="pending">待处理</option><option value="approved">通过</option><option value="rejected">不通过</option></select><textarea placeholder="审批意见" value={step.opinion} onChange={(event) => setApproval(step.id, { opinion: event.target.value })} /></div>; })}<button className="text-button" onClick={() => { const last = approvals[approvals.length - 1]; const middle = approvals.slice(0, -1); updateWorking({ approvals: [...middle, { id: uid(), name: `审批人 ${middle.length}`, opinion: "", status: "pending" }, { ...last, name: "验收人" }] }); }}>＋ 添加中间审批步骤</button><button className="text-button" onClick={() => onUpload("approval")}>上传审批附件</button><button className="text-button" onClick={onFiles}>查看全部附件（{files.length}）</button></section>
 
-    <section className="working-section"><h3>七、节点的执行结果 <em>*</em></h3><textarea placeholder="填写成果说明、未通过原因或修改建议" value={working.resultNote} onChange={(event) => updateWorking({ resultNote: event.target.value })} /><div className="result-actions"><button className="reject" disabled={node.status !== "active"} onClick={() => updateWorking({ resultStatus: "rejected" })}>不通过</button><button className="approve" disabled={node.status !== "active" || !working.content.trim()} onClick={onComplete}>验收通过并进入下一节点</button></div></section>
+    <section className="working-section"><h3>七、节点的执行结果 <em>*</em></h3><textarea placeholder="填写成果说明、未通过原因或修改建议" value={working.resultNote} onChange={(event) => updateWorking({ resultNote: event.target.value })} /><div className="result-actions"><button className="reject" disabled={node.status !== "active"} onClick={() => updateWorking({ resultStatus: "rejected" })}>不通过</button><button className="approve" disabled={Boolean(completionReason)} onClick={onComplete}>验收通过并进入下一节点</button></div>{completionReason && <small className="approval-help">{completionReason}</small>}</section>
 
     <section className="working-section"><h3>八、节点连接关系</h3><div className="link-list">{project.links.filter((link) => link.from === node.id || link.to === node.id).map((link) => { const otherId = link.from === node.id ? link.to : link.from; const other = project.nodes.find((item) => item.id === otherId); return <div key={link.id}><span>{link.kind === "logic" ? "逻辑线" : "关系线"} · {link.from === node.id ? "指向" : "来自"} {other?.title || "未知节点"}</span><button disabled={!editable} onClick={() => onDeleteLink(link.id)}>删除</button></div>; })}{!project.links.some((link) => link.from === node.id || link.to === node.id) && <p className="muted">尚未建立连接。请使用画布顶部的逻辑线或关系线工具。</p>}</div></section>
 
-    <section className="panel-actions"><button onClick={() => { onProjectChange((current) => ({ ...current, nodes: [...current.nodes, { id: `node-${uid()}`, parentId: node.id, title: "节点名称，点击可修改", categoryId: current.categories[0].id, start: node.start, end: node.end, progress: 0, weight: 1, status: "pending", working: emptyWorking() }] })); }}>＋ 添加子节点</button><button onClick={onFiles}>附件 {files.length}</button><button className="danger" disabled={!editable} onClick={onDelete}>删除本节点</button></section>
+    <section className="panel-actions"><button onClick={() => { onProjectChange((current) => ({ ...current, nodes: [...current.nodes, { id: `node-${uid()}`, parentId: node.id, title: "节点名称，点击可修改", categoryId: current.categories[0].id, start: node.start, end: node.end, progress: 0, weight: 1, status: "pending", working: emptyWorking() }] })); }}>＋ 添加子节点</button><button disabled={!childrenOf(project, node.id).length} onClick={onToggleExpanded}>{expanded ? "收起子节点" : "展开子节点"}</button><button className="danger" disabled={!editable} onClick={onDelete}>删除本节点</button></section>
   </aside>;
 }
 

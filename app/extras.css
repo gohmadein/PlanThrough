@@ -23,3 +23,60 @@
   font-size: 11px;
   color: #7a879a;
 }
+
+.category-lane > span {
+  top: auto;
+  bottom: 8px;
+}
+
+.frame-band {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  border-bottom: 1px solid rgba(105, 128, 165, 0.28);
+  pointer-events: none;
+}
+
+.frame-category {
+  top: auto;
+  bottom: 6px;
+}
+
+.frame-timeline {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 7px;
+  height: 28px;
+  border-top: 1px solid rgba(90, 113, 150, 0.48);
+  color: #65748b;
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.frame-timeline > div {
+  position: absolute;
+  inset: 0;
+}
+
+.frame-timeline span {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.frame-timeline > b {
+  position: absolute;
+  right: 3px;
+  bottom: 0;
+  font-size: 9px;
+}
+
+.approval-help {
+  display: block;
+  margin-top: 7px;
+  color: #9b6710;
+  font-size: 11px;
+  line-height: 1.45;
+}
