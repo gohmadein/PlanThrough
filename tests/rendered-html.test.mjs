@@ -33,6 +33,16 @@ test("ships the workflow canvas, working panel, and project library", async () =
   assert.match(tool, /floating-timeline/);
   assert.match(tool, /局部时间/);
   assert.match(tool, /当前任务/);
+  assert.match(tool, /未存在一条由起点连接到终点的有效逻辑通路/);
+  assert.match(tool, /继续/);
+  assert.match(tool, /暂停/);
+  assert.match(tool, /展开全部/);
+  assert.match(tool, /关闭全部/);
+  assert.match(tool, /返回全局/);
+  assert.match(tool, /visibleExitIds/);
+  assert.match(tool, /上传附件/);
+  assert.match(tool, /点击发起/);
+  assert.match(tool, /通过\/退回/);
   assert.match(library, /planthrough-projects-v2/);
   assert.match(readme, /npm install/);
   assert.match(readme, /npm run dev/);
