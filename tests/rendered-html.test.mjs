@@ -20,7 +20,7 @@ test("server-renders PlanThrough routes and product metadata", async () => {
 });
 
 test("ships the workflow canvas, working panel, and project library", async () => {
-  const [tool, library, readme] = await Promise.all([readFile(new URL("../app/PlanTool.tsx", import.meta.url), "utf8"), readFile(new URL("../app/ProjectLibrary.tsx", import.meta.url), "utf8"), readFile(new URL("../README.md", import.meta.url), "utf8")]);
+  const [tool, library, readme, extras] = await Promise.all([readFile(new URL("../app/PlanTool.tsx", import.meta.url), "utf8"), readFile(new URL("../app/ProjectLibrary.tsx", import.meta.url), "utf8"), readFile(new URL("../README.md", import.meta.url), "utf8"), readFile(new URL("../app/extras.css", import.meta.url), "utf8")]);
   assert.match(tool, /新建节点/);
   assert.match(tool, /逻辑线/);
   assert.match(tool, /关系线/);
@@ -43,7 +43,27 @@ test("ships the workflow canvas, working panel, and project library", async () =
   assert.match(tool, /上传附件/);
   assert.match(tool, /点击发起/);
   assert.match(tool, /通过\/退回/);
+  assert.match(tool, /toggleCanvasTool/);
+  assert.match(tool, /hasOtherKindBetweenSameNodes/);
+  assert.match(tool, /canOpenFrame/);
+  assert.match(tool, /删除模式：点击逻辑线或关系线即可删除/);
+  assert.match(tool, /tool !== "delete"/);
+  assert.match(tool, /双击日期区域修改/);
+  assert.match(tool, /新的项目周期必须包含节点/);
+  assert.match(tool, /workspace-help-button/);
+  assert.match(tool, /PlanThrough 使用帮助/);
+  assert.match(tool, /起点和终点也是逻辑连接点/);
+  assert.match(tool, /起点 → 第一个一级节点/);
+  assert.match(tool, /nodeMetrics/);
+  assert.match(tool, /durationWidth/);
+  assert.match(tool, /并发时间线/);
+  assert.doesNotMatch(tool, /className="node-time-line"/);
+  assert.match(tool, /className="approve"[\s\S]*className="rejection-row"/);
   assert.match(library, /planthrough-projects-v2/);
   assert.match(readme, /npm install/);
   assert.match(readme, /npm run dev/);
+  assert.match(extras, /\.plan-node\.pending[\s\S]*filter: none/);
+  assert.match(extras, /\.canvas\.draft \.plan-node \.traffic-lights i/);
+  assert.match(extras, /\.workspace-help-button/);
+  assert.match(extras, /\.help-modal/);
 });

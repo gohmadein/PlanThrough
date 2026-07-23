@@ -12,7 +12,7 @@ import {
 type ProjectStatus = "draft" | "running" | "paused" | "completed";
 type NodeStatus = "pending" | "active" | "completed";
 type LinkKind = "logic" | "relation";
-type Tool = "select" | "node" | "logic" | "relation";
+type Tool = "select" | "node" | "logic" | "relation" | "delete";
 type WorkingSection = "principles" | "content" | "acceptance" | "approval" | "result";
 
 type Category = { id: string; name: string; color: string };
@@ -336,13 +336,13 @@ function nodeTone(project: Project, node: PlanNode): NodeStatus {
   return "pending";
 }
 
-function bezier(a: Positioned, b: Positioned) {
+function bezier(a: Positioned, b: Positioned, offset = 0) {
   const x1 = a.x + a.width;
   const y1 = a.y + a.height / 2;
   const x2 = b.x;
   const y2 = b.y + b.height / 2;
   const bend = Math.max(60, Math.abs(x2 - x1) * 0.42);
-  return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+  return `M ${x1} ${y1} C ${x1 + bend} ${y1 + offset}, ${x2 - bend} ${y2 + offset}, ${x2} ${y2}`;
 }
 
 export default function PlanTool() {
@@ -354,6 +354,7 @@ export default function PlanTool() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [linkSource, setLinkSource] = useState<string | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(true);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [uploadSection, setUploadSection] = useState<WorkingSection>("content");
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -434,17 +435,33 @@ export default function PlanTool() {
   const layout = useMemo(() => {
     const positions = new Map<string, Positioned>();
     const frames: Frame[] = [];
-    const FRAME_HEADER = 42;
+    const FRAME_HEADER = 18;
     const BAND_HEIGHT = 116;
     const FRAME_AXIS = 40;
+    const canOpenFrame = (node: PlanNode) => childrenOf(project, node.id).length > 0 || nodeDepth(project, node) < 2;
+    const nodeMetrics = (node: PlanNode, level = nodeDepth(project, node)) => {
+      const durationWidth = Math.max(34, dateX(node.end) - dateX(node.start));
+      const height = durationWidth < 100 ? (level === 0 ? 142 : 134) : durationWidth < 170 ? (level === 0 ? 82 : 76) : level === 0 ? 64 : 58;
+      return { width: durationWidth, height };
+    };
+    const rowOffset = (nodes: PlanNode[], node: PlanNode, level: number) => {
+      const index = Math.max(0, nodes.findIndex((item) => item.id === node.id));
+      if (index % 2 === 0) return 0;
+      const firstRowHeight = nodes
+        .filter((_, itemIndex) => itemIndex % 2 === 0)
+        .reduce((height, item) => Math.max(height, nodeMetrics(item, level).height), level === 0 ? 64 : 58);
+      return firstRowHeight + 14;
+    };
     function measureBand(parentId: string, categoryId: string): number {
       const nodes = sortedSiblings(project, parentId).filter((node) => node.categoryId === categoryId && (!focusLayoutIds || focusLayoutIds.has(node.id)));
       let nestedCursor = 0;
       let requiredHeight = BAND_HEIGHT;
-      nodes.forEach((node, index) => {
-        const nodeBottom = 18 + (index % 2) * 46 + 58;
+      nodes.forEach((node) => {
+        const level = nodeDepth(project, node);
+        const metrics = nodeMetrics(node, level);
+        const nodeBottom = 18 + rowOffset(nodes, node, level) + metrics.height;
         requiredHeight = Math.max(requiredHeight, nodeBottom + 18);
-        if (!expanded.has(node.id) || !childrenOf(project, node.id).length) return;
+        if (!expanded.has(node.id) || !canOpenFrame(node)) return;
         const nestedTop = Math.max(nodeBottom + 14, nestedCursor);
         nestedCursor = nestedTop + measureFrame(node.id) + 18;
         requiredHeight = Math.max(requiredHeight, nestedCursor);
@@ -460,9 +477,10 @@ export default function PlanTool() {
     const rootNodes = sortedSiblings(project, null).filter((node) => !focusLayoutIds || focusLayoutIds.has(node.id));
     const categoryBands = project.categories.map((category) => {
       const nodes = rootNodes.filter((node) => node.categoryId === category.id);
-      const requiredHeight = nodes.reduce((height, node, index) => {
-        const nodeBottom = 50 + (index % 2) * 70 + 64;
-        const expandedBottom = expanded.has(node.id) && childrenOf(project, node.id).length
+      const requiredHeight = nodes.reduce((height, node) => {
+        const metrics = nodeMetrics(node, 0);
+        const nodeBottom = 50 + rowOffset(nodes, node, 0) + metrics.height;
+        const expandedBottom = expanded.has(node.id) && canOpenFrame(node)
           ? nodeBottom + 14 + measureFrame(node.id) + 24
           : nodeBottom + 30;
         return Math.max(height, expandedBottom);
@@ -505,17 +523,14 @@ export default function PlanTool() {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
         const band = bands[catIndex];
         const x = dateX(node.start);
-        const endX = dateX(node.end);
-        const minWidth = level === 1 ? 170 : 145;
-        const width = Math.max(minWidth, endX - x);
+        const metrics = nodeMetrics(node, level);
         const categorySiblings = siblings.filter((other) => other.categoryId === node.categoryId);
-        const row = Math.max(0, categorySiblings.findIndex((other) => other.id === node.id)) % 2;
-        const y = band.y + 18 + row * 46;
-        positions.set(node.id, { node, x, y, width, height: 58, level, number: displayNumber(project, node) });
+        const y = band.y + 18 + rowOffset(categorySiblings, node, level);
+        positions.set(node.id, { node, x, y, width: metrics.width, height: metrics.height, level, number: displayNumber(project, node) });
       });
       const nestedCursors = new Map<string, number>();
       siblings.forEach((node) => {
-        if (!expanded.has(node.id) || !childrenOf(project, node.id).length) return;
+        if (!expanded.has(node.id) || !canOpenFrame(node)) return;
         const owner = positions.get(node.id);
         if (!owner) return;
         const band = bands.find((item) => item.categoryId === node.categoryId);
@@ -535,19 +550,16 @@ export default function PlanTool() {
       siblings.forEach((node) => {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
         const categorySiblings = siblings.filter((other) => other.categoryId === node.categoryId);
-        const row = Math.max(0, categorySiblings.findIndex((other) => other.id === node.id)) % 2;
         const x = dateX(node.start);
         const endX = dateX(node.end);
-        const minWidth = 220;
-        const width = Math.max(minWidth, endX - x);
-        const height = 64;
-        const y = categoryBands[catIndex].y + 50 + row * 70;
+        const metrics = nodeMetrics(node, 0);
+        const y = categoryBands[catIndex].y + 50 + rowOffset(categorySiblings, node, 0);
         const number = displayNumber(project, node);
-        positions.set(node.id, { node, x, y, width, height, level: 0, number });
-        if (expanded.has(node.id) && childrenOf(project, node.id).length) {
+        positions.set(node.id, { node, x, y, width: metrics.width, height: metrics.height, level: 0, number });
+        if (expanded.has(node.id) && canOpenFrame(node)) {
           const frameWidth = Math.max(280, endX - x + 20);
           const frameX = x - 10;
-          const frameY = y + height + 14;
+          const frameY = y + metrics.height + 14;
           placeFrame(node, frameX, frameY, frameWidth, 1);
         }
       });
@@ -642,6 +654,14 @@ export default function PlanTool() {
     const allOpen = expandableIds.length > 0 && expandableIds.every((id) => expanded.has(id));
     setExpanded(allOpen ? new Set() : new Set(expandableIds));
     setToast(allOpen ? "已收起全部子节点" : "已展开全部子节点");
+  };
+
+  const toggleCanvasTool = (nextTool: Exclude<Tool, "select">) => {
+    const closing = tool === nextTool;
+    setTool(closing ? "select" : nextTool);
+    setLinkSource(null);
+    const toolName = nextTool === "relation" ? "关系线" : nextTool === "logic" ? "逻辑线" : nextTool === "delete" ? "删除" : "新建节点";
+    setToast(closing ? `${toolName}模式已退出` : nextTool === "delete" ? "删除模式：点击逻辑线或关系线即可删除" : `${toolName}模式已开启`);
   };
 
   const enterFocus = (nodeId: string) => {
@@ -1055,11 +1075,11 @@ export default function PlanTool() {
           <span className="brand-mark">P↘</span><span><b>PlanThrough</b><small>一张图，无限穿透</small></span>
         </button>
         <nav className="canvas-tools" aria-label="画布工具">
-          <button className={tool === "node" ? "active" : ""} onClick={() => { setTool((current) => current === "node" ? "select" : "node"); setLinkSource(null); }}>＋ 新建节点</button>
-          <button className={tool === "logic" ? "active" : ""} onClick={() => { setTool((current) => current === "logic" ? "select" : "logic"); setLinkSource(null); }}>➜ 逻辑线</button>
-          <button className={tool === "relation" ? "active" : ""} onClick={() => { setTool((current) => current === "relation" ? "select" : "relation"); setLinkSource(null); }}>⇢ 关系线</button>
+          <button className={tool === "node" ? "active" : ""} onClick={() => toggleCanvasTool("node")}>＋ 新建节点</button>
+          <button className={tool === "logic" ? "active" : ""} onClick={() => toggleCanvasTool("logic")}>➜ 逻辑线</button>
+          <button className={tool === "relation" ? "active" : ""} onClick={() => toggleCanvasTool("relation")}>⇢ 关系线</button>
           <button disabled={!expandableNodeIds.length} onClick={toggleAllExpanded}>{allNodesExpanded ? "关闭全部" : "展开全部"}</button>
-          <button className="delete-tool" disabled={!selected || !editable} onClick={deleteSelected}>删除</button>
+          <button className={`delete-tool ${tool === "delete" ? "active" : ""}`} disabled={!editable} onClick={() => toggleCanvasTool("delete")}>删除</button>
         </nav>
         <div className="project-center">
           <button className="project-title" title="双击修改项目名称" onDoubleClick={() => {
@@ -1083,7 +1103,7 @@ export default function PlanTool() {
           }}>＋ 新项目</button>
           <button className="btn" onClick={() => importRef.current?.click()}>导入</button>
           <button className="btn" onClick={exportProject}>导出</button>
-          <button className={`btn ${project.timelineVisible ? "active" : ""}`} onClick={() => setProject((current) => ({ ...current, timelineVisible: !current.timelineVisible }))}>时间线</button>
+          <button className={`btn ${project.timelineVisible ? "active" : ""}`} onClick={() => setProject((current) => ({ ...current, timelineVisible: !current.timelineVisible }))}>并发时间线</button>
           <button className="btn fit-roots" onClick={fitRootNodes}>适应全局</button>
           <button className="zoom" disabled={zoom <= MIN_ZOOM} title="缩小" onClick={() => setZoom((value) => clamp(value - (value > 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>−</button>
           <label className="zoom-slider" title={`当前缩放 ${Math.round(zoom * 100)}%`}>
@@ -1097,7 +1117,7 @@ export default function PlanTool() {
 
       <section className={`workspace ${overviewOpen ? "with-overview" : ""} ${selected ? "with-editor" : ""}`}>
         {overviewOpen
-          ? <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} />
+          ? <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} onProjectChange={setProject} onHelp={() => setHelpOpen(true)} />
           : <button className="overview-reopen" onClick={() => setOverviewOpen(true)}>项目总览 ›</button>}
         <div className="canvas-scroll" ref={canvasRef} onPointerDown={canvasPointerDown}>
           <footer className={`floating-timeline ${floatingAxis.frame ? "local" : "global"}`} style={{ width: canvasWidth }}>
@@ -1106,12 +1126,6 @@ export default function PlanTool() {
             <b>{floatingAxis.label}</b>
           </footer>
           <div className={`canvas ${project.status} ${tool !== "select" ? "tool-active" : ""} ${tool}-mode ${focusNode ? "focus-mode" : ""}`} style={{ width: canvasWidth, height: mainHeight }}>
-            {project.timelineVisible && [...layout.positions.values()]
-              .filter((item) => !focusVisibleIds || focusVisibleIds.has(item.node.id))
-              .flatMap((item) => [
-                <div className="node-time-line" key={`${item.node.id}-start`} style={{ left: dateX(item.node.start) }} />,
-                <div className="node-time-line" key={`${item.node.id}-end`} style={{ left: dateX(item.node.end) }} />,
-              ])}
             {project.categories.map((category, index) => (
               <div className="category-lane" key={category.id} style={{ top: layout.categoryBands[index].y, height: layout.categoryBands[index].height }}>
                 <span style={{ color: category.color }}><i style={{ background: category.color }} />{category.name}</span>
@@ -1135,7 +1149,6 @@ export default function PlanTool() {
 
             {layout.frames.filter((frame) => !focusVisibleIds || focusVisibleIds.has(frame.nodeId)).map((frame) => (
               <div className={`child-frame level-${frame.level}`} key={frame.nodeId} style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}>
-                <b>{project.nodes.find((node) => node.id === frame.nodeId)?.title} · 下级任务</b>
                 {frame.bands.map((band) => {
                   const category = project.categories.find((cat) => cat.id === band.categoryId)!;
                   return <div className="frame-band" key={band.categoryId} style={{ top: band.y - frame.y, height: band.height }}><span className="frame-category" style={{ color: category.color }}><i style={{ background: category.color }} />{category.name}</span></div>;
@@ -1150,6 +1163,11 @@ export default function PlanTool() {
                 <marker id="relation-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
               </defs>
               {project.links.flatMap((link) => {
+                const hasOtherKindBetweenSameNodes = project.links.some((other) =>
+                  other.id !== link.id
+                  && other.kind !== link.kind
+                  && ((other.from === link.from && other.to === link.to) || (other.from === link.to && other.to === link.from)));
+                const curveOffset = hasOtherKindBetweenSameNodes && link.kind === "relation" ? 34 : 0;
                 const fromIds = link.from === START_ID ? [START_ID] : visibleExitIds(project, link.from, expanded);
                 const toIds = link.to === END_ID ? [END_ID] : visibleEntryIds(project, link.to, expanded);
                 return fromIds.flatMap((fromId) => toIds.map((toId) => {
@@ -1162,23 +1180,40 @@ export default function PlanTool() {
                     ? ({ x: canvasWidth - 58, y: anchorTop, width: 20, height: 20 } as Positioned)
                     : layout.positions.get(toId);
                   if (!a || !b) return null;
-                  return <path key={`${link.id}-${fromId}-${toId}`} className={link.kind} d={bezier(a, b)} markerEnd={`url(#${link.kind}-arrow)`} />;
+                  return <path
+                    key={`${link.id}-${fromId}-${toId}`}
+                    className={link.kind}
+                    d={bezier(a, b, curveOffset)}
+                    markerEnd={`url(#${link.kind}-arrow)`}
+                    onPointerDown={(event) => {
+                      if (tool === "delete") event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      if (tool !== "delete") return;
+                      event.stopPropagation();
+                      setProject((current) => ({ ...current, links: current.links.filter((item) => item.id !== link.id) }));
+                      setToast(`${link.kind === "logic" ? "逻辑线" : "关系线"}已删除`);
+                    }}
+                  />;
                 }));
               })}
             </svg>
 
-            {concurrency.map((line, index) => <div key={`${line.x}-${index}`} className="concurrency-line" style={{ left: line.x }} onPointerEnter={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: line.text })} onPointerMove={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: line.text })} onPointerLeave={() => setTooltip(null)} />)}
-            {project.timelineVisible && <div className="today-line" style={{ left: dateX(today) }} onPointerEnter={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: `当前日期：${today}` })} onPointerLeave={() => setTooltip(null)} />}
+            {project.timelineVisible && concurrency.map((line, index) => <div key={`${line.x}-${index}`} className="concurrency-line" style={{ left: line.x }} onPointerEnter={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: line.text })} onPointerMove={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: line.text })} onPointerLeave={() => setTooltip(null)} />)}
+            <div className="today-line" style={{ left: dateX(today) }} onPointerEnter={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: `当前日期：${today}` })} onPointerLeave={() => setTooltip(null)} />
 
             {[...layout.positions.values()].filter((item) => !focusVisibleIds || focusVisibleIds.has(item.node.id)).map((item) => {
               const tone = nodeTone(project, item.node);
               const progress = calculatedProgress(project, item.node);
               const hasChildren = childrenOf(project, item.node.id).length > 0;
+              const canToggleFrame = hasChildren || item.level < 2;
+              const density = item.width < 100 ? "narrow" : item.width < 170 ? "compact" : "regular";
               return (
                 <article
                   key={item.node.id}
-                  className={`plan-node level-${item.level} ${tone} ${selectedId === item.node.id ? "selected" : ""} ${linkSource === item.node.id ? "link-source" : ""}`}
+                  className={`plan-node level-${item.level} ${tone} ${density} ${selectedId === item.node.id ? "selected" : ""} ${linkSource === item.node.id ? "link-source" : ""}`}
                   style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
+                  title={`${item.node.title}\n${item.node.start} → ${item.node.end}\n进度 ${progress}%`}
                   onClick={(event) => { event.stopPropagation(); handleNodeClick(item.node); }}
                   onDoubleClick={(event) => {
                     event.stopPropagation();
@@ -1197,7 +1232,7 @@ export default function PlanTool() {
                   <strong title={item.node.title}>{item.node.title}</strong>
                   <button className="working-button" title={selectedId === item.node.id ? "关闭 Working" : "打开 Working"} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setSelectedId((current) => current === item.node.id ? null : item.node.id); }}>W</button>
                   <button className="focus-button" title="全屏查看当前节点及其子节点" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); enterFocus(item.node.id); }}>⛶</button>
-                  <button className="expand-button" title={expanded.has(item.node.id) ? "收起" : "向下展开"} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setExpanded((current) => { const next = new Set(current); if (next.has(item.node.id)) next.delete(item.node.id); else next.add(item.node.id); return next; }); }}>{expanded.has(item.node.id) ? "△" : "▽"}</button>
+                  {canToggleFrame && <button className="expand-button" title={expanded.has(item.node.id) ? "收起" : "向下展开"} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setExpanded((current) => { const next = new Set(current); if (next.has(item.node.id)) next.delete(item.node.id); else next.add(item.node.id); return next; }); }}>{expanded.has(item.node.id) ? "△" : "▽"}</button>}
                   <div className="node-meta">{shortDate(item.node.start)} → {shortDate(item.node.end)} · {progress}%</div>
                   <div className="progress"><i style={{ width: `${progress}%` }} /></div>
                   {editable && <><span className="resize-handle left" onPointerDown={(event) => startDrag(event, item.node, "start")} /><span className="resize-handle right" onPointerDown={(event) => startDrag(event, item.node, "end")} /></>}
@@ -1230,6 +1265,7 @@ export default function PlanTool() {
 
       <input ref={uploadRef} hidden type="file" multiple onChange={uploadFiles} accept=".doc,.docx,.pdf,.ppt,.pptx,.xls,.xlsx,.txt,.png,.jpg,.jpeg,.zip" />
       {filesOpen && selected && <FileDialog files={nodeFiles} node={selected} onClose={() => setFilesOpen(false)} onDownload={downloadFile} onRemove={removeFile} />}
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {tooltip && <div className="line-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>{tooltip.text}</div>}
       {approvalTooltip && approvalNode && <div className="approval-tooltip" role="tooltip" style={{ left: approvalTooltip.x, top: approvalTooltip.y }}>
         <header><div><small>{displayNumber(project, approvalNode)} · 审批流程</small><b>{approvalNode.title}</b></div><span>{approvalNode.working.approvals.filter((step) => step.status === "approved").length}/{approvalNode.working.approvals.length} 已通过</span></header>
@@ -1243,18 +1279,65 @@ export default function PlanTool() {
   );
 }
 
-function Overview({ project, activePath, onClose }: { project: Project; activePath: PlanNode[]; onClose: () => void }) {
+function Overview({ project, activePath, onClose, onProjectChange, onHelp }: {
+  project: Project;
+  activePath: PlanNode[];
+  onClose: () => void;
+  onProjectChange: (value: Project | ((current: Project) => Project)) => void;
+  onHelp: () => void;
+}) {
   const levels = [0, 1, 2].map((level) => project.nodes.filter((node) => nodeDepth(project, node) === level));
   const rate = (nodes: PlanNode[]) => nodes.length ? Math.round(nodes.reduce((sum, node) => sum + calculatedProgress(project, node), 0) / nodes.length) : 0;
   const current = activePath.at(-1);
   const approval = current?.working.approvals.find((step) => step.status === "pending") || current?.working.approvals.at(-1);
   const approvalText = !current ? "暂无" : approval ? `${approval.name} · ${approval.status === "approved" ? "已通过" : approval.status === "rejected" ? "未通过" : "待处理"}` : "未设置";
+  const [editingRange, setEditingRange] = useState(false);
+  const [rangeStart, setRangeStart] = useState(project.start);
+  const [rangeEnd, setRangeEnd] = useState(project.end);
+  const [rangeError, setRangeError] = useState("");
+
+  const saveRange = () => {
+    if (parseDate(rangeEnd) <= parseDate(rangeStart)) {
+      setRangeError("结束日期必须晚于开始日期");
+      return;
+    }
+    const outside = project.nodes.find((node) => parseDate(node.start) < parseDate(rangeStart) || parseDate(node.end) > parseDate(rangeEnd));
+    if (outside) {
+      setRangeError(`新的项目周期必须包含节点“${outside.title}”的时间范围`);
+      return;
+    }
+    onProjectChange((value) => ({ ...value, start: rangeStart, end: rangeEnd }));
+    setEditingRange(false);
+    setRangeError("");
+  };
+
   return <aside className="overview-panel">
     <header><b>项目工作台</b><button onClick={onClose} title="收起左侧栏">‹</button></header>
-    <section><h3>项目总览</h3><dl><div><dt>项目周期</dt><dd>{Math.ceil((parseDate(project.end) - parseDate(project.start)) / DAY)} 天</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点</dt><dd>{nodes.length} 个</dd></div>)}</dl></section>
+    <section>
+      <h3>项目总览</h3>
+      <dl><div><dt>项目周期</dt><dd>{Math.ceil((parseDate(project.end) - parseDate(project.start)) / DAY)} 天</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点</dt><dd>{nodes.length} 个</dd></div>)}</dl>
+      {!editingRange
+        ? <div className="project-range" title="双击修改项目起止日期" onDoubleClick={() => {
+          setRangeStart(project.start);
+          setRangeEnd(project.end);
+          setRangeError("");
+          setEditingRange(true);
+        }}>
+          <p><span>开始日期</span><b>{project.start}</b></p>
+          <p><span>结束日期</span><b>{project.end}</b></p>
+          <small>双击日期区域修改</small>
+        </div>
+        : <div className="project-range-editor">
+          <label>开始日期<input type="date" value={rangeStart} max={rangeEnd} onChange={(event) => { setRangeStart(event.target.value); setRangeError(""); }} /></label>
+          <label>结束日期<input type="date" value={rangeEnd} min={rangeStart} onChange={(event) => { setRangeEnd(event.target.value); setRangeError(""); }} /></label>
+          {rangeError && <small>{rangeError}</small>}
+          <div><button onClick={() => { setEditingRange(false); setRangeError(""); }}>取消</button><button className="save" onClick={saveRange}>保存</button></div>
+        </div>}
+    </section>
     <section><h3>项目效率</h3><dl><div><dt>整体节点完成率</dt><dd>{rate(project.nodes)}%</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点完成率</dt><dd>{rate(nodes)}%</dd></div>)}</dl></section>
     <section className="current-path"><h3>当前节点</h3>{[0, 1, 2].map((level) => { const node = activePath.find((item) => nodeDepth(project, item) === level); return <p key={level}><b>{level + 1}级</b><span>{node ? `${displayNumber(project, node)} · ${node.title}` : "—"}</span></p>; })}<p><b>审批</b><span>{approvalText}</span></p></section>
     <section className="canvas-key"><h3>图例</h3><p><i className="node-swatch root" />一级节点</p><p><i className="node-swatch child" />二级节点</p><p><i className="node-swatch grandchild" />三级节点</p><p><i className="line-swatch logic" />逻辑线（执行顺序）</p><p><i className="line-swatch relation" />关系线（仅关联）</p><p><i className="line-swatch parallel" />并发时间线</p><p><i className="line-swatch today" />当前日期线</p><hr /><p><i className="status-dot pending" />未执行</p><p><i className="status-dot active" />当前任务</p><p><i className="status-dot completed" />已完成</p></section>
+    <button className="workspace-help-button" onClick={onHelp}><span>?</span>帮助</button>
   </aside>;
 }
 
@@ -1316,11 +1399,11 @@ function WorkingPanel({ project, node, editable, files, expanded, onClose, onUpd
       <button className="text-button" onClick={onFiles}>查看全部附件（{files.length}）</button>
     </section>
 
-    <section className="working-section"><h3>七、节点的执行结果 <em>*</em></h3><textarea placeholder="填写成果说明、未通过原因或修改建议" value={working.resultNote} onChange={(event) => updateWorking({ resultNote: event.target.value })} /><div className="result-actions"><button className="reject" disabled={effectiveStatus !== "active"} onClick={() => updateWorking({ resultStatus: "rejected" })}>不通过</button><button className="approve" disabled={Boolean(completionReason)} onClick={onComplete}>验收通过并进入下一节点</button></div>{completionReason && <small className="approval-help">{completionReason}</small>}</section>
+    <section className="working-section"><h3>七、节点的执行结果 <em>*</em></h3><div className="result-actions"><button className="approve" disabled={Boolean(completionReason)} onClick={onComplete}>验收通过并进入下一节点</button><div className="rejection-row"><button className="reject" disabled={effectiveStatus !== "active"} onClick={() => updateWorking({ resultStatus: "rejected" })}>不通过</button><textarea placeholder="填写不通过原因或修改建议" value={working.resultNote} onChange={(event) => updateWorking({ resultNote: event.target.value })} /></div></div>{completionReason && <small className="approval-help">{completionReason}</small>}</section>
 
     <section className="working-section"><h3>八、节点连接关系</h3><div className="link-list">{project.links.filter((link) => link.from === node.id || link.to === node.id).map((link) => { const otherId = link.from === node.id ? link.to : link.from; const other = project.nodes.find((item) => item.id === otherId); return <div key={link.id}><span>{link.kind === "logic" ? "逻辑线" : "关系线"} · {link.from === node.id ? "指向" : "来自"} {other?.title || "未知节点"}</span><button disabled={!editable} onClick={() => onDeleteLink(link.id)}>删除</button></div>; })}{!project.links.some((link) => link.from === node.id || link.to === node.id) && <p className="muted">尚未建立连接。请使用画布顶部的逻辑线或关系线工具。</p>}</div></section>
 
-    <section className="panel-actions"><button onClick={() => { onProjectChange((current) => ({ ...current, nodes: [...current.nodes, { id: `node-${uid()}`, parentId: node.id, title: "节点名称，点击可修改", categoryId: current.categories[0].id, start: node.start, end: node.end, progress: 0, weight: 1, status: "pending", working: emptyWorking() }] })); }}>＋ 添加子节点</button><button disabled={!childrenOf(project, node.id).length} onClick={onToggleExpanded}>{expanded ? "收起子节点" : "展开子节点"}</button><button className="danger" disabled={!editable} onClick={onDelete}>删除本节点</button></section>
+    <section className="panel-actions"><button onClick={() => { onProjectChange((current) => ({ ...current, nodes: [...current.nodes, { id: `node-${uid()}`, parentId: node.id, title: "节点名称，点击可修改", categoryId: current.categories[0].id, start: node.start, end: node.end, progress: 0, weight: 1, status: "pending", working: emptyWorking() }] })); }}>＋ 添加子节点</button><button disabled={!childrenOf(project, node.id).length && nodeDepth(project, node) >= 2} onClick={onToggleExpanded}>{expanded ? "收起子节点" : "展开子节点"}</button><button className="danger" disabled={!editable} onClick={onDelete}>删除本节点</button></section>
   </aside>;
 }
 
@@ -1330,4 +1413,98 @@ function WorkingText({ title, value, disabled, required, onChange, onUpload }: {
 
 function FileDialog({ files, node, onClose, onDownload, onRemove }: { files: AttachmentMeta[]; node: PlanNode; onClose: () => void; onDownload: (file: AttachmentMeta) => void; onRemove: (file: AttachmentMeta) => void }) {
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal files-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><small>节点附件</small><h2>{node.title}</h2></div><button onClick={onClose}>×</button></header><p>共 {files.length} 个文件</p><div className="file-list">{files.map((file) => <article key={file.id}><span>📎</span><div><b>{file.name}</b><small>{formatSize(file.size)} · {file.section}</small></div><button onClick={() => onDownload(file)}>下载</button><button className="danger" onClick={() => onRemove(file)}>删除</button></article>)}{!files.length && <div className="empty-files">这个节点还没有上传文件</div>}</div></div></div>;
+}
+
+function HelpDialog({ onClose }: { onClose: () => void }) {
+  return <div className="modal-backdrop" onMouseDown={onClose}>
+    <div className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onMouseDown={(event) => event.stopPropagation()}>
+      <header>
+        <div><small>PLAN THROUGH GUIDE</small><h2 id="help-title">PlanThrough 使用帮助</h2></div>
+        <button onClick={onClose} aria-label="关闭帮助">×</button>
+      </header>
+
+      <div className="help-critical">
+        <b>启动前必须形成一条完整的逻辑通路</b>
+        <p>起点和终点也是逻辑连接点，必须使用“逻辑线”依次连接：</p>
+        <div>起点 → 第一个一级节点 → 后续一级节点 → 最后一个一级节点 → 终点</div>
+        <p>缺少起点、终点或中间任意一段连接时，点击开始会提示“未存在有效通路”，项目不会启动。</p>
+      </div>
+
+      <div className="help-grid">
+        <section className="help-section wide">
+          <h3>这个项目可以做什么</h3>
+          <ul>
+            <li>在一张二维画布中，以横轴表示时间、纵向分区表示 Thinking / Doing / Acting 等事件分类。</li>
+            <li>用一级、二级、三级节点逐层拆解项目；展开后显示半透明子任务框和更细的局部时间刻度。</li>
+            <li>节点宽度对应实际工期；自动识别时间重叠并显示并发时间线。</li>
+            <li>通过逻辑线安排执行顺序，通过关系线表达仅关联、不影响执行的关系。</li>
+            <li>记录节点执行内容、验收标准、团队成员、审批步骤、成果说明与附件，并自动归并进度。</li>
+            <li>支持项目库、导入导出、全局适配、缩放、节点聚焦查看和风险状态提示。</li>
+          </ul>
+        </section>
+
+        <section className="help-section wide">
+          <h3>推荐使用流程</h3>
+          <ol className="help-steps">
+            <li><b>建立项目：</b>点击“新项目”。新项目默认创建三年周期，可在左侧“项目总览”的日期区域双击修改起止日期。</li>
+            <li><b>建立骨架：</b>点击“新建节点”，再点击画布创建一级节点；双击节点名称可重命名。</li>
+            <li><b>调整时间与分类：</b>拖动节点可修改时间位置和 Thinking / Doing / Acting 分类；拖动节点左右边缘可调整开始、结束日期。</li>
+            <li><b>拆解任务：</b>点击节点的小三角展开，再通过 Working 面板添加子节点。一级、二级节点即使暂时没有子节点也可先展开。</li>
+            <li><b>完善节点：</b>点击节点上的 W，填写执行原则、执行内容、验收标准、团队、审批流、成果说明并上传附件。</li>
+            <li><b>建立顺序：</b>点击“逻辑线”，依次选择前后节点。务必把起点和终点也接入完整通路；需要表达普通关联时使用“关系线”。</li>
+            <li><b>检查并开始：</b>点击画布中的起点。系统验证通路有效后启动项目，并解锁当前应执行的节点。</li>
+            <li><b>执行与验收：</b>在当前节点更新进度、推进审批，验收通过后进入下一节点。黄色表示当前任务，绿色表示完成。</li>
+            <li><b>暂停或继续：</b>使用顶部项目名称旁的“暂停 / 继续”控制执行状态，不会删除现有数据。</li>
+            <li><b>完成项目：</b>全部末端逻辑节点完成后，点击终点正式完成项目，终点会变绿。</li>
+          </ol>
+        </section>
+
+        <section className="help-section">
+          <h3>画布工具</h3>
+          <dl>
+            <div><dt>新建节点</dt><dd>开启后点击画布创建一级节点，再次点击按钮可退出。</dd></div>
+            <div><dt>逻辑线</dt><dd>决定执行顺序、节点解锁和启动通路。</dd></div>
+            <div><dt>关系线</dt><dd>只表示关联，不参与进度与解锁判断。</dd></div>
+            <div><dt>展开全部</dt><dd>一次展开所有一级、二级节点；再次关闭可恢复全局视图。</dd></div>
+            <div><dt>删除</dt><dd>进入删除模式后，可点击逻辑线或关系线删除；其他线不可删除。</dd></div>
+            <div><dt>适应全局</dt><dd>自动调整缩放，使全部一级节点尽量进入当前视野。</dd></div>
+          </dl>
+        </section>
+
+        <section className="help-section">
+          <h3>节点按钮与状态</h3>
+          <dl>
+            <div><dt>W</dt><dd>打开或关闭节点 Working 工作面板。</dd></div>
+            <div><dt>聚焦图标</dt><dd>用整个画布查看该节点及其所有下级，点击“返回全局”退出。</dd></div>
+            <div><dt>三角按钮</dt><dd>展开或收起子节点及局部时间轴。</dd></div>
+            <div><dt>三灯熄灭</dt><dd>项目尚未开始。</dd></div>
+            <div><dt>红灯</dt><dd>项目启动后尚未执行。</dd></div>
+            <div><dt>黄灯</dt><dd>当前需要执行的任务。</dd></div>
+            <div><dt>绿灯</dt><dd>节点已验收完成。</dd></div>
+          </dl>
+        </section>
+
+        <section className="help-section">
+          <h3>审批与附件</h3>
+          <ul>
+            <li>审批流第一步为发起人，最后一步固定为审定人；新增步骤会插入两者之间。</li>
+            <li>每一步都可以填写人员、说明、上传附件，并执行发起、通过或退回。</li>
+            <li>“验收通过”位于执行结果上方；不通过及原因填写位于下方。</li>
+            <li>附件保存在当前浏览器设备中，可在节点附件弹窗下载或删除。</li>
+          </ul>
+        </section>
+
+        <section className="help-section">
+          <h3>实用提示</h3>
+          <ul>
+            <li>时间很短的节点会自动压缩信息；鼠标悬停可查看完整标题、时间和审批状态。</li>
+            <li>展开节点后，逻辑线会自动连接到当前可见的最深层入口或出口节点。</li>
+            <li>项目数据自动保存在当前浏览器；建议定期使用“导出”保存 JSON 备份。</li>
+            <li>导出的 JSON 不包含附件文件本体，更换电脑时请另行下载并保存附件。</li>
+          </ul>
+        </section>
+      </div>
+      <footer><button className="btn primary" onClick={onClose}>知道了，开始使用</button></footer>
+    </div>
+  </div>;
 }
