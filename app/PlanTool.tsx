@@ -80,10 +80,20 @@ type DragState = {
   startY: number;
   original: PlanNode;
 };
+type ViewSnapshot = {
+  zoom: number;
+  scrollLeft: number;
+  scrollTop: number;
+  overviewOpen: boolean;
+  selectedId: string | null;
+  expanded: Set<string>;
+};
 
 const DAY = 86_400_000;
-const MIN_ZOOM = 0.6;
+const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 5;
+const START_ID = "__project_start__";
+const END_ID = "__project_end__";
 const PROJECTS_KEY = "planthrough-projects-v2";
 const CURRENT_KEY = "planthrough-current-v2";
 const COLORS = ["#2f73ff", "#25a878", "#8b68e8", "#e59a24", "#df5f72", "#299bb4"];
@@ -102,7 +112,7 @@ const emptyWorking = (): Working => ({
   team: [{ id: uid(), name: "", role: "", duty: "", breakdown: "" }],
   approvals: [
     { id: uid(), name: "发起人", opinion: "", status: "pending" },
-    { id: uid(), name: "验收人", opinion: "", status: "pending" },
+    { id: uid(), name: "审定人", opinion: "", status: "pending" },
   ],
   resultNote: "",
   resultStatus: "pending",
@@ -113,7 +123,9 @@ const formatSize = (size: number) =>
 function blankProject(name = "未命名项目", start?: string, end?: string, categoryNames = ["Thinking", "Doing", "Acting"]): Project {
   const now = new Date();
   const s = start || dateString(now.getTime());
-  const e = end || dateString(now.getTime() + 180 * DAY);
+  const defaultEnd = new Date(now);
+  defaultEnd.setFullYear(defaultEnd.getFullYear() + 3);
+  const e = end || dateString(defaultEnd.getTime());
   const stamp = new Date().toISOString();
   return {
     version: 2,
@@ -195,6 +207,57 @@ function childrenOf(project: Project, parentId: string | null) {
   return project.nodes.filter((node) => node.parentId === parentId);
 }
 
+function logicEntries(project: Project, parentId: string | null) {
+  const siblings = sortedSiblings(project, parentId);
+  const siblingIds = new Set(siblings.map((node) => node.id));
+  const incoming = new Set(project.links
+    .filter((link) => link.kind === "logic" && siblingIds.has(link.from) && siblingIds.has(link.to))
+    .map((link) => link.to));
+  return siblings.filter((node) => !incoming.has(node.id));
+}
+
+function logicExits(project: Project, parentId: string | null) {
+  const siblings = sortedSiblings(project, parentId);
+  const siblingIds = new Set(siblings.map((node) => node.id));
+  const outgoing = new Set(project.links
+    .filter((link) => link.kind === "logic" && siblingIds.has(link.from) && siblingIds.has(link.to))
+    .map((link) => link.from));
+  return siblings.filter((node) => !outgoing.has(node.id));
+}
+
+function visibleEntryIds(project: Project, nodeId: string, expanded: Set<string>): string[] {
+  if (!expanded.has(nodeId) || !childrenOf(project, nodeId).length) return [nodeId];
+  return logicEntries(project, nodeId).flatMap((node) => visibleEntryIds(project, node.id, expanded));
+}
+
+function visibleExitIds(project: Project, nodeId: string, expanded: Set<string>): string[] {
+  if (!expanded.has(nodeId) || !childrenOf(project, nodeId).length) return [nodeId];
+  return logicExits(project, nodeId).flatMap((node) => visibleExitIds(project, node.id, expanded));
+}
+
+function hasStartToEndPath(project: Project) {
+  const adjacency = new Map<string, string[]>();
+  project.links.filter((link) => link.kind === "logic").forEach((link) => {
+    adjacency.set(link.from, [...(adjacency.get(link.from) || []), link.to]);
+  });
+  const queue = [START_ID];
+  const visited = new Set<string>();
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current === END_ID) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    (adjacency.get(current) || []).forEach((next) => {
+      if (!visited.has(next)) queue.push(next);
+    });
+  }
+  return false;
+}
+
+function predecessorComplete(project: Project, id: string) {
+  return id === START_ID || project.nodes.find((node) => node.id === id)?.status === "completed";
+}
+
 function descendants(project: Project, id: string): PlanNode[] {
   const direct = childrenOf(project, id);
   return direct.flatMap((node) => [node, ...descendants(project, node.id)]);
@@ -235,7 +298,8 @@ function calculatedProgress(project: Project, node: PlanNode): number {
 
 function terminalRoots(project: Project) {
   const roots = childrenOf(project, null);
-  const outgoing = new Set(project.links.filter((link) => link.kind === "logic").map((link) => link.from));
+  const rootIds = new Set(roots.map((node) => node.id));
+  const outgoing = new Set(project.links.filter((link) => link.kind === "logic" && rootIds.has(link.to)).map((link) => link.from));
   return roots.filter((node) => !outgoing.has(node.id));
 }
 
@@ -257,7 +321,7 @@ function isPendingExecutable(project: Project, node: PlanNode) {
     : !siblings.some((item) => item.status === "active");
   if (!contextActive) return false;
   if (incoming.length) {
-    return incoming.every((link) => project.nodes.find((item) => item.id === link.from)?.status === "completed");
+    return incoming.every((link) => predecessorComplete(project, link.from));
   }
   const entryCandidates = siblings.filter((item) => {
     const hasIncoming = project.links.some((link) => link.kind === "logic" && link.to === item.id);
@@ -290,16 +354,17 @@ export default function PlanTool() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [linkSource, setLinkSource] = useState<string | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(true);
-  const [createOpen, setCreateOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [uploadSection, setUploadSection] = useState<WorkingSection>("content");
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const [approvalTooltip, setApprovalTooltip] = useState<{ x: number; y: number; nodeId: string } | null>(null);
   const [toast, setToast] = useState("");
   const [celebrating, setCelebrating] = useState(false);
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [today] = useState(() => dateString(new Date().getTime()));
   const [viewportWidth, setViewportWidth] = useState(0);
   const dragRef = useRef<DragState | null>(null);
+  const viewSnapshotRef = useRef<ViewSnapshot | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -335,16 +400,36 @@ export default function PlanTool() {
   }, []);
 
   const selected = project.nodes.find((node) => node.id === selectedId) || null;
+  const focusNode = project.nodes.find((node) => node.id === focusNodeId) || null;
   const editable = canEdit(project);
-  const totalRange = Math.max(DAY, parseDate(project.end) - parseDate(project.start));
+  const viewStart = focusNode?.start || project.start;
+  const viewEnd = focusNode?.end || project.end;
+  const totalRange = Math.max(DAY, parseDate(viewEnd) - parseDate(viewStart));
   const spanDays = Math.ceil(totalRange / DAY);
-  const availableWidth = Math.max(900, viewportWidth - (overviewOpen ? 270 : 0) - (selected ? 370 : 0));
-  const canvasWidth = Math.max(availableWidth, Math.round((spanDays < 60 ? 32 : spanDays < 370 ? 8 : 3.2) * spanDays * zoom));
+  const availableWidth = Math.max(900, viewportWidth - (overviewOpen && !focusNode ? 270 : 0) - (selected && !focusNode ? 490 : 0));
+  const basePixelsPerDay = spanDays < 60 ? 32 : spanDays < 370 ? 8 : 3.2;
+  const canvasWidth = Math.max(availableWidth, Math.round(basePixelsPerDay * spanDays * zoom));
   const rootTop = 112;
-  const dateX = (date: string, left = 70, width = canvasWidth - 140, start = project.start, end = project.end) => {
+  const dateX = (date: string, left = 70, width = canvasWidth - 140, start = viewStart, end = viewEnd) => {
     const range = Math.max(DAY, parseDate(end) - parseDate(start));
     return left + clamp((parseDate(date) - parseDate(start)) / range, 0, 1) * width;
   };
+
+  const focusVisibleIds = useMemo(() => {
+    if (!focusNode) return null;
+    return new Set([focusNode.id, ...descendants(project, focusNode.id).map((node) => node.id)]);
+  }, [focusNode, project]);
+
+  const focusLayoutIds = useMemo(() => {
+    if (!focusNode) return null;
+    const ids = new Set([focusNode.id, ...descendants(project, focusNode.id).map((node) => node.id)]);
+    let parentId = focusNode.parentId;
+    while (parentId) {
+      ids.add(parentId);
+      parentId = project.nodes.find((node) => node.id === parentId)?.parentId || null;
+    }
+    return ids;
+  }, [focusNode, project]);
 
   const layout = useMemo(() => {
     const positions = new Map<string, Positioned>();
@@ -353,7 +438,7 @@ export default function PlanTool() {
     const BAND_HEIGHT = 116;
     const FRAME_AXIS = 40;
     function measureBand(parentId: string, categoryId: string): number {
-      const nodes = sortedSiblings(project, parentId).filter((node) => node.categoryId === categoryId);
+      const nodes = sortedSiblings(project, parentId).filter((node) => node.categoryId === categoryId && (!focusLayoutIds || focusLayoutIds.has(node.id)));
       let nestedCursor = 0;
       let requiredHeight = BAND_HEIGHT;
       nodes.forEach((node, index) => {
@@ -372,7 +457,7 @@ export default function PlanTool() {
         + FRAME_AXIS;
     }
     let categoryCursor = rootTop;
-    const rootNodes = sortedSiblings(project, null);
+    const rootNodes = sortedSiblings(project, null).filter((node) => !focusLayoutIds || focusLayoutIds.has(node.id));
     const categoryBands = project.categories.map((category) => {
       const nodes = rootNodes.filter((node) => node.categoryId === category.id);
       const requiredHeight = nodes.reduce((height, node, index) => {
@@ -415,7 +500,7 @@ export default function PlanTool() {
       });
       const frameAxis = makeFrameTicks(parent.start, parent.end, level);
       frames.push({ nodeId: parent.id, level, x: frameX, y: frameY, width: frameWidth, height: frameHeight, bands, ...frameAxis });
-      const siblings = sortedSiblings(project, parent.id);
+      const siblings = sortedSiblings(project, parent.id).filter((node) => !focusLayoutIds || focusLayoutIds.has(node.id));
       siblings.forEach((node) => {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
         const band = bands[catIndex];
@@ -446,7 +531,7 @@ export default function PlanTool() {
     };
     const placeRoots = () => {
       const parentId: string | null = null;
-      const siblings = sortedSiblings(project, parentId);
+      const siblings = sortedSiblings(project, parentId).filter((node) => !focusLayoutIds || focusLayoutIds.has(node.id));
       siblings.forEach((node) => {
         const catIndex = Math.max(0, project.categories.findIndex((cat) => cat.id === node.categoryId));
         const categorySiblings = siblings.filter((other) => other.categoryId === node.categoryId);
@@ -472,14 +557,30 @@ export default function PlanTool() {
     const contentHeight = Math.max(baseContentHeight, ...frames.map((frame) => frame.y + frame.height + 24), ...[...positions.values()].map((item) => item.y + item.height));
     return { positions, frames, categoryBands, contentHeight };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, expanded, canvasWidth]);
+  }, [project, expanded, canvasWidth, focusLayoutIds]);
 
   const mainHeight = layout.contentHeight + 70;
+  const doingIndex = Math.max(0, project.categories.findIndex((category) => category.name.toLowerCase() === "doing"));
+  const doingBand = layout.categoryBands[doingIndex] || layout.categoryBands[0];
+  const anchorTop = doingBand ? doingBand.y + doingBand.height / 2 - 25 : 30;
+
+  useEffect(() => {
+    if (!focusNodeId || !canvasRef.current) return;
+    const position = layout.positions.get(focusNodeId);
+    if (!position) return;
+    const frame = layout.frames.find((item) => item.nodeId === focusNodeId);
+    const width = frame?.width || position.width;
+    const height = frame ? frame.height + position.height + 16 : position.height;
+    const left = Math.max(0, position.x - Math.max(30, (canvasRef.current.clientWidth - width) / 2));
+    const top = Math.max(0, position.y - Math.max(30, (canvasRef.current.clientHeight - height) / 2));
+    window.requestAnimationFrame(() => canvasRef.current?.scrollTo({ left, top, behavior: "smooth" }));
+  }, [focusNodeId, layout]);
 
   const concurrency = useMemo(() => {
     const lines: { x: number; text: string }[] = [];
     const groups = new Map<string, PlanNode[]>();
     project.nodes.forEach((node) => {
+      if (focusVisibleIds && !focusVisibleIds.has(node.id)) return;
       const key = node.parentId || "root";
       groups.set(key, [...(groups.get(key) || []), node]);
     });
@@ -491,28 +592,28 @@ export default function PlanTool() {
           const pa = layout.positions.get(a.id);
           const pb = layout.positions.get(b.id);
           if (pa && pb) {
-            const ratio = (start - parseDate(project.start)) / totalRange;
+            const ratio = (start - parseDate(viewStart)) / totalRange;
             lines.push({ x: 70 + ratio * (canvasWidth - 140), text: `并发：${a.title} 与 ${b.title}\n${dateString(start)} 至 ${dateString(end)}` });
           }
         }
       }));
     });
     return lines;
-  }, [project, layout, canvasWidth, totalRange]);
+  }, [project, layout, canvasWidth, totalRange, viewStart, focusVisibleIds]);
 
   const ticks = useMemo(() => {
     const result: { x: number; label: string }[] = [];
     const days = Math.ceil(totalRange / DAY);
     const step = days > 730 ? 365 : days > 180 ? 30 : days > 45 ? 7 : 1;
     for (let d = 0; d <= days; d += step) {
-      const time = parseDate(project.start) + d * DAY;
+      const time = parseDate(viewStart) + d * DAY;
       const date = new Date(time);
       const label = step === 365 ? `${date.getFullYear()}年` : step === 30 ? `${date.getFullYear()}年${date.getMonth() + 1}月` : `${date.getMonth() + 1}/${date.getDate()}`;
       result.push({ x: dateX(dateString(time)), label });
     }
     return result;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.start, project.end, canvasWidth]);
+  }, [viewStart, viewEnd, canvasWidth]);
 
   const floatingAxis = useMemo(() => {
     const detailLevel = zoom < 1.25 ? 0 : zoom < 1.65 ? 1 : 2 + Math.floor((zoom - 1.65) / 0.85);
@@ -534,6 +635,126 @@ export default function PlanTool() {
 
   const updateNode = (id: string, changes: Partial<PlanNode>) => {
     setProject((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === id ? { ...node, ...changes } : node) }));
+  };
+
+  const toggleAllExpanded = () => {
+    const expandableIds = project.nodes.filter((node) => childrenOf(project, node.id).length).map((node) => node.id);
+    const allOpen = expandableIds.length > 0 && expandableIds.every((id) => expanded.has(id));
+    setExpanded(allOpen ? new Set() : new Set(expandableIds));
+    setToast(allOpen ? "已收起全部子节点" : "已展开全部子节点");
+  };
+
+  const enterFocus = (nodeId: string) => {
+    if (!canvasRef.current) return;
+    viewSnapshotRef.current = {
+      zoom,
+      scrollLeft: canvasRef.current.scrollLeft,
+      scrollTop: canvasRef.current.scrollTop,
+      overviewOpen,
+      selectedId,
+      expanded: new Set(expanded),
+    };
+    const idsToExpand = [nodeId, ...descendants(project, nodeId).map((node) => node.id)]
+      .filter((id) => childrenOf(project, id).length);
+    let parentId = project.nodes.find((node) => node.id === nodeId)?.parentId || null;
+    while (parentId) {
+      idsToExpand.push(parentId);
+      parentId = project.nodes.find((node) => node.id === parentId)?.parentId || null;
+    }
+    setExpanded((current) => new Set([...current, ...idsToExpand]));
+    setFocusNodeId(nodeId);
+    setOverviewOpen(false);
+    setSelectedId(null);
+    setZoom(1);
+    setToast("已进入节点全屏聚焦，点击右上角“返回全局”退出");
+  };
+
+  const exitFocus = () => {
+    const snapshot = viewSnapshotRef.current;
+    setFocusNodeId(null);
+    if (!snapshot) return;
+    setZoom(snapshot.zoom);
+    setOverviewOpen(snapshot.overviewOpen);
+    setSelectedId(snapshot.selectedId);
+    setExpanded(new Set(snapshot.expanded));
+    window.requestAnimationFrame(() => {
+      canvasRef.current?.scrollTo({ left: snapshot.scrollLeft, top: snapshot.scrollTop });
+    });
+    viewSnapshotRef.current = null;
+  };
+
+  const fitRootNodes = () => {
+    const projectDays = Math.max(1, Math.ceil((parseDate(project.end) - parseDate(project.start)) / DAY));
+    const factor = projectDays < 60 ? 32 : projectDays < 370 ? 8 : 3.2;
+    setZoom(clamp((availableWidth - 160) / Math.max(1, factor * projectDays), MIN_ZOOM, 1));
+    window.requestAnimationFrame(() => canvasRef.current?.scrollTo({ left: 0, top: 0, behavior: "smooth" }));
+    setToast("已缩放到可查看全部一级节点");
+  };
+
+  const connectTarget = (targetId: string) => {
+    if (tool !== "logic" && tool !== "relation") return false;
+    if (!editable) {
+      setToast("请先暂停项目，再修改连接关系");
+      return true;
+    }
+    const isEndpoint = targetId === START_ID || targetId === END_ID;
+    if (tool === "relation" && isEndpoint) {
+      setToast("起点和终点只能建立逻辑线");
+      return true;
+    }
+    if (!linkSource) {
+      if (targetId === END_ID) {
+        setToast("终点只能作为逻辑线的目标");
+        return true;
+      }
+      setLinkSource(targetId);
+      setToast("请选择要连接的目标");
+      return true;
+    }
+    if (linkSource === targetId) {
+      setLinkSource(null);
+      return true;
+    }
+    if (targetId === START_ID || linkSource === END_ID) {
+      setToast("逻辑线必须从起点流向终点");
+      return true;
+    }
+    if (linkSource === START_ID && targetId === END_ID) {
+      setToast("起点和终点之间至少需要一个任务节点");
+      return true;
+    }
+    const source = project.nodes.find((item) => item.id === linkSource);
+    const target = project.nodes.find((item) => item.id === targetId);
+    if (linkSource === START_ID && target?.parentId) {
+      setToast("起点只能连接一级节点");
+      return true;
+    }
+    if (targetId === END_ID && source?.parentId) {
+      setToast("终点只能由一级节点连接");
+      return true;
+    }
+    if (!isEndpoint && linkSource !== START_ID && source && target && tool === "logic" && source.parentId !== target.parentId) {
+      setToast("逻辑线只能连接同一父节点下的同级节点");
+      return true;
+    }
+    if (source && target && tool === "logic") {
+      const wouldReverse = project.links.some((link) => link.kind === "logic" && link.from === target.id && link.to === source.id);
+      if (wouldReverse) {
+        setToast("不能建立相互循环的逻辑线");
+        return true;
+      }
+    }
+    const kind = tool;
+    setProject((current) => ({
+      ...current,
+      links: [
+        ...current.links.filter((link) => !(link.kind === kind && link.from === linkSource && link.to === targetId)),
+        { id: `link-${uid()}`, kind, from: linkSource, to: targetId },
+      ],
+    }));
+    setLinkSource(null);
+    setToast(kind === "logic" ? "逻辑线已建立" : "关系线已建立");
+    return true;
   };
 
   const createNodeAt = (x: number, y: number) => {
@@ -578,25 +799,9 @@ export default function PlanTool() {
 
   const handleNodeClick = (node: PlanNode) => {
     if (tool === "logic" || tool === "relation") {
-      if (!editable) return setToast("请先暂停项目，再修改连接关系");
-      if (!linkSource) {
-        setLinkSource(node.id);
-        return setToast("请选择要连接的目标节点");
-      }
-      if (linkSource === node.id) return setLinkSource(null);
-      const source = project.nodes.find((item) => item.id === linkSource);
-      if (!source || source.parentId !== node.parentId) return setToast("只能连接同一父节点下的同级节点");
-      if (tool === "logic") {
-        const wouldReverse = project.links.some((link) => link.kind === "logic" && link.from === node.id && link.to === source.id);
-        if (wouldReverse) return setToast("不能建立相互循环的逻辑线");
-      }
-      const kind = tool;
-      setProject((current) => ({ ...current, links: [...current.links.filter((link) => !(link.kind === kind && link.from === source.id && link.to === node.id)), { id: `link-${uid()}`, kind, from: source.id, to: node.id }] }));
-      setLinkSource(null);
-      setTool("select");
+      connectTarget(node.id);
       return;
     }
-    setSelectedId(node.id);
   };
 
   const startDrag = (event: ReactPointerEvent, node: PlanNode, kind: DragState["kind"]) => {
@@ -643,13 +848,14 @@ export default function PlanTool() {
   const endDrag = () => { dragRef.current = null; };
 
   const activateEntry = (current: Project, parentId: string | null): Project => {
-    const siblings = sortedSiblings(current, parentId);
-    const incoming = new Set(current.links.filter((link) => link.kind === "logic" && siblings.some((node) => node.id === link.to)).map((link) => link.to));
-    const first = siblings.filter((node) => !incoming.has(node.id)).sort((a, b) => parseDate(a.start) - parseDate(b.start))[0];
-    if (!first) return current;
-    const nodes = current.nodes.map((node) => node.id === first.id ? { ...node, status: "active" as NodeStatus } : node);
+    const entries = logicEntries(current, parentId);
+    if (!entries.length) return current;
+    const entryIds = new Set(entries.map((node) => node.id));
+    const nodes = current.nodes.map((node) => entryIds.has(node.id) ? { ...node, status: "active" as NodeStatus } : node);
     let next = { ...current, nodes };
-    if (childrenOf(next, first.id).length) next = activateEntry(next, first.id);
+    entries.forEach((entry) => {
+      if (childrenOf(next, entry.id).length) next = activateEntry(next, entry.id);
+    });
     return next;
   };
 
@@ -658,20 +864,48 @@ export default function PlanTool() {
     const eligible = current.nodes.filter((node) => {
       if (node.status !== "pending") return false;
       const incoming = current.links.filter((link) => link.kind === "logic" && link.to === node.id);
-      return incoming.length > 0 && incoming.every((link) => current.nodes.find((item) => item.id === link.from)?.status === "completed");
+      return incoming.length > 0 && incoming.every((link) => predecessorComplete(current, link.from));
     });
     let next = { ...current, nodes: current.nodes.map((node) => eligible.some((item) => item.id === node.id) ? { ...node, status: "active" as NodeStatus } : node) };
     eligible.forEach((node) => { if (childrenOf(next, node.id).length) next = activateEntry(next, node.id); });
     return next;
   };
 
-  const toggleProject = () => {
+  const startProject = () => {
     setProject((current) => {
-      if (current.status === "completed") return current;
-      if (current.status === "running") return { ...current, status: "paused" };
-      if (current.status === "paused") return resumeEligible({ ...current, status: "running" });
+      if (current.status !== "draft") return current;
       if (!current.nodes.length) { setToast("请先创建至少一个节点"); return current; }
-      return activateEntry({ ...current, status: "running" }, null);
+      if (!hasStartToEndPath(current)) {
+        setToast("未存在一条由起点连接到终点的有效逻辑通路，项目未启动");
+        return current;
+      }
+      const startTargets = current.links
+        .filter((link) => link.kind === "logic" && link.from === START_ID)
+        .map((link) => link.to);
+      let next: Project = {
+        ...current,
+        status: "running",
+        nodes: current.nodes.map((node) => startTargets.includes(node.id) ? { ...node, status: "active" } : node),
+      };
+      startTargets.forEach((id) => {
+        if (childrenOf(next, id).length) next = activateEntry(next, id);
+      });
+      setToast("有效逻辑通路检查通过，项目已开始");
+      return next;
+    });
+  };
+
+  const togglePause = () => {
+    setProject((current) => {
+      if (current.status === "running") {
+        setToast("项目已暂停");
+        return { ...current, status: "paused" };
+      }
+      if (current.status === "paused") {
+        setToast("项目已继续");
+        return resumeEligible({ ...current, status: "running" });
+      }
+      return current;
     });
   };
 
@@ -732,6 +966,20 @@ export default function PlanTool() {
     setToast("节点已删除，请重新建立逻辑线");
   };
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Delete") return;
+      const target = event.target as HTMLElement;
+      if (target.matches("input, textarea, select") || target.isContentEditable) return;
+      if (selected && editable) {
+        event.preventDefault();
+        void deleteSelected();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
   const uploadFiles = async (event: ChangeEvent<HTMLInputElement>) => {
     if (!selected) return;
     const files = Array.from(event.target.files || []);
@@ -784,6 +1032,8 @@ export default function PlanTool() {
   };
 
   const nodeFiles = selected ? project.attachments.filter((file) => file.nodeId === selected.id) : [];
+  const expandableNodeIds = project.nodes.filter((node) => childrenOf(project, node.id).length).map((node) => node.id);
+  const allNodesExpanded = expandableNodeIds.length > 0 && expandableNodeIds.every((id) => expanded.has(id));
   const activePath = project.nodes.filter((node) => nodeTone(project, node) === "active").sort((a, b) => nodeDepth(project, a) - nodeDepth(project, b));
   const approvalNode = approvalTooltip ? project.nodes.find((node) => node.id === approvalTooltip.nodeId) : null;
   const showApprovalTooltip = (event: ReactPointerEvent<HTMLElement>, nodeId: string) => {
@@ -805,18 +1055,37 @@ export default function PlanTool() {
           <span className="brand-mark">P↘</span><span><b>PlanThrough</b><small>一张图，无限穿透</small></span>
         </button>
         <nav className="canvas-tools" aria-label="画布工具">
-          <button className={tool === "node" ? "active" : ""} onClick={() => { setTool("node"); setLinkSource(null); }}>＋ 新建节点</button>
-          <button className={tool === "logic" ? "active" : ""} onClick={() => { setTool("logic"); setLinkSource(null); }}>➜ 逻辑线</button>
-          <button className={tool === "relation" ? "active" : ""} onClick={() => { setTool("relation"); setLinkSource(null); }}>⇢ 关系线</button>
+          <button className={tool === "node" ? "active" : ""} onClick={() => { setTool((current) => current === "node" ? "select" : "node"); setLinkSource(null); }}>＋ 新建节点</button>
+          <button className={tool === "logic" ? "active" : ""} onClick={() => { setTool((current) => current === "logic" ? "select" : "logic"); setLinkSource(null); }}>➜ 逻辑线</button>
+          <button className={tool === "relation" ? "active" : ""} onClick={() => { setTool((current) => current === "relation" ? "select" : "relation"); setLinkSource(null); }}>⇢ 关系线</button>
+          <button disabled={!expandableNodeIds.length} onClick={toggleAllExpanded}>{allNodesExpanded ? "关闭全部" : "展开全部"}</button>
+          <button className="delete-tool" disabled={!selected || !editable} onClick={deleteSelected}>删除</button>
         </nav>
-        <button className="project-title" onClick={() => editable && setCreateOpen(true)}>{project.name}<small>{project.status === "draft" ? "设计中" : project.status === "running" ? "执行中" : project.status === "paused" ? "已暂停" : "已完成"}</small></button>
+        <div className="project-center">
+          <button className="project-title" title="双击修改项目名称" onDoubleClick={() => {
+            if (!editable) return;
+            const name = window.prompt("修改项目名称", project.name)?.trim();
+            if (name) setProject((current) => ({ ...current, name }));
+          }}>{project.name}<small>{project.status === "draft" ? "设计中" : project.status === "running" ? "执行中" : project.status === "paused" ? "已暂停" : "已完成"}</small></button>
+          <button className={`run-toggle ${project.status}`} disabled={project.status === "draft" || project.status === "completed"} onClick={togglePause}>{project.status === "paused" ? "▶ 继续" : "Ⅱ 暂停"}</button>
+        </div>
         <div className="top-actions">
+          {focusNode && <button className="btn focus-exit" onClick={exitFocus}>↩ 返回全局</button>}
           <a href="/projects" className="btn">项目查看</a>
-          <button className="btn" onClick={() => setCreateOpen(true)}>＋ 新项目</button>
+          <button className="btn" onClick={() => {
+            const fresh = blankProject();
+            setProject(fresh);
+            setExpanded(new Set());
+            setSelectedId(null);
+            setFocusNodeId(null);
+            setZoom(1);
+            setToast("已创建三年画布的新项目，双击顶部名称即可重命名");
+          }}>＋ 新项目</button>
           <button className="btn" onClick={() => importRef.current?.click()}>导入</button>
           <button className="btn" onClick={exportProject}>导出</button>
           <button className={`btn ${project.timelineVisible ? "active" : ""}`} onClick={() => setProject((current) => ({ ...current, timelineVisible: !current.timelineVisible }))}>时间线</button>
-          <button className="zoom" disabled={zoom <= MIN_ZOOM} title="缩小（最低 60%）" onClick={() => setZoom((value) => clamp(value - (value > 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>−</button>
+          <button className="btn fit-roots" onClick={fitRootNodes}>适应全局</button>
+          <button className="zoom" disabled={zoom <= MIN_ZOOM} title="缩小" onClick={() => setZoom((value) => clamp(value - (value > 2 ? 0.25 : 0.1), MIN_ZOOM, MAX_ZOOM))}>−</button>
           <label className="zoom-slider" title={`当前缩放 ${Math.round(zoom * 100)}%`}>
             <input aria-label="画布缩放" type="range" min={MIN_ZOOM * 100} max={MAX_ZOOM * 100} step="5" value={Math.round(zoom * 100)} onInput={(event) => setZoom(Number(event.currentTarget.value) / 100)} onChange={(event) => setZoom(Number(event.currentTarget.value) / 100)} />
             <span>{Math.round(zoom * 100)}%</span>
@@ -831,27 +1100,40 @@ export default function PlanTool() {
           ? <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} />
           : <button className="overview-reopen" onClick={() => setOverviewOpen(true)}>项目总览 ›</button>}
         <div className="canvas-scroll" ref={canvasRef} onPointerDown={canvasPointerDown}>
-          {project.timelineVisible && <footer className={`floating-timeline ${floatingAxis.frame ? "local" : "global"}`} style={{ width: canvasWidth }}>
+          <footer className={`floating-timeline ${floatingAxis.frame ? "local" : "global"}`} style={{ width: canvasWidth }}>
             {floatingAxis.frame && <i className="floating-scope" style={{ left: floatingAxis.frame.x, width: floatingAxis.frame.width }} />}
             {floatingAxis.ticks.map((tick) => <span key={`${tick.x}-${tick.label}`} style={{ left: tick.x }}>{tick.label}</span>)}
             <b>{floatingAxis.label}</b>
-          </footer>}
-          <div className={`canvas ${tool !== "select" ? "tool-active" : ""}`} style={{ width: canvasWidth, height: mainHeight }}>
-            {project.timelineVisible && ticks.map((tick) => <div className="time-grid" key={`${tick.x}-${tick.label}`} style={{ left: tick.x }} />)}
+          </footer>
+          <div className={`canvas ${project.status} ${tool !== "select" ? "tool-active" : ""} ${tool}-mode ${focusNode ? "focus-mode" : ""}`} style={{ width: canvasWidth, height: mainHeight }}>
+            {project.timelineVisible && [...layout.positions.values()]
+              .filter((item) => !focusVisibleIds || focusVisibleIds.has(item.node.id))
+              .flatMap((item) => [
+                <div className="node-time-line" key={`${item.node.id}-start`} style={{ left: dateX(item.node.start) }} />,
+                <div className="node-time-line" key={`${item.node.id}-end`} style={{ left: dateX(item.node.end) }} />,
+              ])}
             {project.categories.map((category, index) => (
               <div className="category-lane" key={category.id} style={{ top: layout.categoryBands[index].y, height: layout.categoryBands[index].height }}>
                 <span style={{ color: category.color }}><i style={{ background: category.color }} />{category.name}</span>
               </div>
             ))}
-            <div className={`start-marker ${project.status === "draft" ? "blinking" : "started"}`} style={{ left: 28, top: 30 }} onClick={(event) => { event.stopPropagation(); toggleProject(); }}>
-              <i /> <b>{project.status === "running" ? "暂停" : project.status === "paused" ? "继续" : project.status === "completed" ? "已完成" : "点击启动"}</b>
+            {!focusNode && <><div className={`start-marker ${project.status === "draft" ? "blinking" : "started"} ${linkSource === START_ID ? "link-source" : ""}`} style={{ left: 28, top: anchorTop }} onClick={(event) => {
+              event.stopPropagation();
+              if (tool === "logic") connectTarget(START_ID);
+              else startProject();
+            }}>
+              <i /> <b>{project.status === "draft" ? "点击开始" : project.status === "completed" ? "已完成" : "已开始"}</b>
             </div>
-            <div className={`end-marker ${project.status === "completed" ? "finished" : project.status !== "draft" ? "armed" : "blinking"} ${allTerminalRootsComplete(project) ? "ready" : ""}`} style={{ left: canvasWidth - 78, top: 30 }} onClick={(event) => { event.stopPropagation(); finishProject(); }}>
+            <div className={`end-marker ${project.status === "completed" ? "finished" : project.status !== "draft" ? "armed" : "blinking"} ${allTerminalRootsComplete(project) ? "ready" : ""} ${linkSource === END_ID ? "link-source" : ""}`} style={{ left: canvasWidth - 78, top: anchorTop }} onClick={(event) => {
+              event.stopPropagation();
+              if (tool === "logic") connectTarget(END_ID);
+              else finishProject();
+            }}>
               <i /> <b>{project.status === "completed" ? "已完成" : "终点"}</b>
             </div>
-            <div className="start-end-line" style={{ left: 50, width: canvasWidth - 100, top: 47 }} />
+            <div className="start-end-line" style={{ left: 50, width: canvasWidth - 100, top: anchorTop + 17 }} /></>}
 
-            {layout.frames.map((frame) => (
+            {layout.frames.filter((frame) => !focusVisibleIds || focusVisibleIds.has(frame.nodeId)).map((frame) => (
               <div className={`child-frame level-${frame.level}`} key={frame.nodeId} style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}>
                 <b>{project.nodes.find((node) => node.id === frame.nodeId)?.title} · 下级任务</b>
                 {frame.bands.map((band) => {
@@ -867,17 +1149,28 @@ export default function PlanTool() {
                 <marker id="logic-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
                 <marker id="relation-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
               </defs>
-              {project.links.map((link) => {
-                const a = layout.positions.get(link.from), b = layout.positions.get(link.to);
-                if (!a || !b) return null;
-                return <path key={link.id} className={link.kind} d={bezier(a, b)} markerEnd={`url(#${link.kind}-arrow)`} />;
+              {project.links.flatMap((link) => {
+                const fromIds = link.from === START_ID ? [START_ID] : visibleExitIds(project, link.from, expanded);
+                const toIds = link.to === END_ID ? [END_ID] : visibleEntryIds(project, link.to, expanded);
+                return fromIds.flatMap((fromId) => toIds.map((toId) => {
+                  if (focusVisibleIds && ((!focusVisibleIds.has(fromId) && fromId !== START_ID) || (!focusVisibleIds.has(toId) && toId !== END_ID))) return null;
+                  if (focusVisibleIds && (fromId === START_ID || toId === END_ID)) return null;
+                  const a = fromId === START_ID
+                    ? ({ x: 28, y: anchorTop, width: 20, height: 20 } as Positioned)
+                    : layout.positions.get(fromId);
+                  const b = toId === END_ID
+                    ? ({ x: canvasWidth - 58, y: anchorTop, width: 20, height: 20 } as Positioned)
+                    : layout.positions.get(toId);
+                  if (!a || !b) return null;
+                  return <path key={`${link.id}-${fromId}-${toId}`} className={link.kind} d={bezier(a, b)} markerEnd={`url(#${link.kind}-arrow)`} />;
+                }));
               })}
             </svg>
 
             {concurrency.map((line, index) => <div key={`${line.x}-${index}`} className="concurrency-line" style={{ left: line.x }} onPointerEnter={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: line.text })} onPointerMove={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: line.text })} onPointerLeave={() => setTooltip(null)} />)}
             {project.timelineVisible && <div className="today-line" style={{ left: dateX(today) }} onPointerEnter={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, text: `当前日期：${today}` })} onPointerLeave={() => setTooltip(null)} />}
 
-            {[...layout.positions.values()].map((item) => {
+            {[...layout.positions.values()].filter((item) => !focusVisibleIds || focusVisibleIds.has(item.node.id)).map((item) => {
               const tone = nodeTone(project, item.node);
               const progress = calculatedProgress(project, item.node);
               const hasChildren = childrenOf(project, item.node.id).length > 0;
@@ -887,6 +1180,12 @@ export default function PlanTool() {
                   className={`plan-node level-${item.level} ${tone} ${selectedId === item.node.id ? "selected" : ""} ${linkSource === item.node.id ? "link-source" : ""}`}
                   style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
                   onClick={(event) => { event.stopPropagation(); handleNodeClick(item.node); }}
+                  onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    if (!editable || tool !== "select") return;
+                    const title = window.prompt("修改节点名称", item.node.title)?.trim();
+                    if (title) updateNode(item.node.id, { title });
+                  }}
                   onPointerEnter={(event) => showApprovalTooltip(event, item.node.id)}
                   onPointerDown={(event) => startDrag(event, item.node, "move")}
                   onPointerMove={(event) => { moveDrag(event, item.node); showApprovalTooltip(event, item.node.id); }}
@@ -896,7 +1195,8 @@ export default function PlanTool() {
                   <div className="node-number">{item.number}</div>
                   <div className="traffic-lights" aria-label={`节点状态：${tone}`}><i className="red" /><i className="yellow" /><i className="green" /></div>
                   <strong title={item.node.title}>{item.node.title}</strong>
-                  <button className="working-button" title="打开 Working" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setSelectedId(item.node.id); }}>W</button>
+                  <button className="working-button" title={selectedId === item.node.id ? "关闭 Working" : "打开 Working"} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setSelectedId((current) => current === item.node.id ? null : item.node.id); }}>W</button>
+                  <button className="focus-button" title="全屏查看当前节点及其子节点" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); enterFocus(item.node.id); }}>⛶</button>
                   <button className="expand-button" title={expanded.has(item.node.id) ? "收起" : "向下展开"} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setExpanded((current) => { const next = new Set(current); if (next.has(item.node.id)) next.delete(item.node.id); else next.add(item.node.id); return next; }); }}>{expanded.has(item.node.id) ? "△" : "▽"}</button>
                   <div className="node-meta">{shortDate(item.node.start)} → {shortDate(item.node.end)} · {progress}%</div>
                   <div className="progress"><i style={{ width: `${progress}%` }} /></div>
@@ -930,7 +1230,6 @@ export default function PlanTool() {
 
       <input ref={uploadRef} hidden type="file" multiple onChange={uploadFiles} accept=".doc,.docx,.pdf,.ppt,.pptx,.xls,.xlsx,.txt,.png,.jpg,.jpeg,.zip" />
       {filesOpen && selected && <FileDialog files={nodeFiles} node={selected} onClose={() => setFilesOpen(false)} onDownload={downloadFile} onRemove={removeFile} />}
-      {createOpen && <ProjectDialog onClose={() => setCreateOpen(false)} onCreate={(value) => { setProject(value); setExpanded(new Set()); setSelectedId(null); setCreateOpen(false); }} />}
       {tooltip && <div className="line-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>{tooltip.text}</div>}
       {approvalTooltip && approvalNode && <div className="approval-tooltip" role="tooltip" style={{ left: approvalTooltip.x, top: approvalTooltip.y }}>
         <header><div><small>{displayNumber(project, approvalNode)} · 审批流程</small><b>{approvalNode.title}</b></div><span>{approvalNode.working.approvals.filter((step) => step.status === "approved").length}/{approvalNode.working.approvals.length} 已通过</span></header>
@@ -989,7 +1288,33 @@ function WorkingPanel({ project, node, editable, files, expanded, onClose, onUpd
 
     <section className="working-section"><h3>四、节点的执行团队</h3>{working.team.map((member) => <div className="team-row" key={member.id}><input placeholder="姓名" value={member.name} onChange={(event) => setTeam(member.id, { name: event.target.value })} /><input placeholder="身份" value={member.role} onChange={(event) => setTeam(member.id, { role: event.target.value })} /><input placeholder="职责" value={member.duty} onChange={(event) => setTeam(member.id, { duty: event.target.value })} /><input placeholder="任务拆解" value={member.breakdown} onChange={(event) => setTeam(member.id, { breakdown: event.target.value })} /></div>)}<button className="text-button" onClick={() => updateWorking({ team: [...working.team, { id: uid(), name: "", role: "", duty: "", breakdown: "" }] })}>＋ 添加成员</button></section>
 
-    <section className="working-section"><h3>六、节点的审批流及成果提交 <em>*</em></h3>{approvals.map((step, index) => { const isFirst = index === 0; const isLast = index === approvals.length - 1; const fixedName = isFirst ? "发起人" : isLast ? "验收人" : step.name; return <div className="approval-step" key={step.id}><b>步骤 {index + 1}</b><input value={fixedName} disabled={isFirst || isLast} onChange={(event) => setApproval(step.id, { name: event.target.value })} /><select value={step.status} onChange={(event) => setApproval(step.id, { status: event.target.value as ApprovalStep["status"] })}><option value="pending">待处理</option><option value="approved">通过</option><option value="rejected">不通过</option></select><textarea placeholder="审批意见" value={step.opinion} onChange={(event) => setApproval(step.id, { opinion: event.target.value })} /></div>; })}<button className="text-button" onClick={() => { const last = approvals[approvals.length - 1]; const middle = approvals.slice(0, -1); updateWorking({ approvals: [...middle, { id: uid(), name: `审批人 ${middle.length}`, opinion: "", status: "pending" }, { ...last, name: "验收人" }] }); }}>＋ 添加中间审批步骤</button><button className="text-button" onClick={() => onUpload("approval")}>上传审批附件</button><button className="text-button" onClick={onFiles}>查看全部附件（{files.length}）</button></section>
+    <section className="working-section approval-flow">
+      <h3>六、节点的审批流及成果提交 <em>*</em></h3>
+      {approvals.map((step, index) => {
+        const isFirst = index === 0;
+        const isLast = index === approvals.length - 1;
+        const role = isFirst ? "发起人" : isLast ? "审定人" : `审批人 ${index}`;
+        const actionLabel = isFirst
+          ? step.status === "approved" ? "已发起" : "点击发起"
+          : step.status === "approved" ? "已通过" : step.status === "rejected" ? "已退回" : "通过/退回";
+        const nextStatus: ApprovalStep["status"] = isFirst
+          ? "approved"
+          : step.status === "pending" ? "approved" : step.status === "approved" ? "rejected" : "pending";
+        return <div className={`approval-step ${step.status}`} key={step.id}>
+          <b>步骤 {index + 1}</b>
+          <input aria-label={`${role}姓名`} placeholder={role} value={step.name === "验收人" && isLast ? "审定人" : step.name} onChange={(event) => setApproval(step.id, { name: event.target.value })} />
+          <textarea aria-label={`${role}说明`} placeholder="输入说明" value={step.opinion} onChange={(event) => setApproval(step.id, { opinion: event.target.value })} />
+          <button className="approval-upload" onClick={() => onUpload("approval")}>上传附件</button>
+          <button className="approval-action" onClick={() => setApproval(step.id, { status: nextStatus })}>{actionLabel}</button>
+        </div>;
+      })}
+      <button className="text-button approval-add" onClick={() => {
+        const last = approvals[approvals.length - 1];
+        const middle = approvals.slice(0, -1);
+        updateWorking({ approvals: [...middle, { id: uid(), name: `审批人 ${middle.length}`, opinion: "", status: "pending" }, { ...last, name: last.name === "验收人" ? "审定人" : last.name }] });
+      }}>＋ 添加中间审批环节</button>
+      <button className="text-button" onClick={onFiles}>查看全部附件（{files.length}）</button>
+    </section>
 
     <section className="working-section"><h3>七、节点的执行结果 <em>*</em></h3><textarea placeholder="填写成果说明、未通过原因或修改建议" value={working.resultNote} onChange={(event) => updateWorking({ resultNote: event.target.value })} /><div className="result-actions"><button className="reject" disabled={effectiveStatus !== "active"} onClick={() => updateWorking({ resultStatus: "rejected" })}>不通过</button><button className="approve" disabled={Boolean(completionReason)} onClick={onComplete}>验收通过并进入下一节点</button></div>{completionReason && <small className="approval-help">{completionReason}</small>}</section>
 
@@ -1005,12 +1330,4 @@ function WorkingText({ title, value, disabled, required, onChange, onUpload }: {
 
 function FileDialog({ files, node, onClose, onDownload, onRemove }: { files: AttachmentMeta[]; node: PlanNode; onClose: () => void; onDownload: (file: AttachmentMeta) => void; onRemove: (file: AttachmentMeta) => void }) {
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal files-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><small>节点附件</small><h2>{node.title}</h2></div><button onClick={onClose}>×</button></header><p>共 {files.length} 个文件</p><div className="file-list">{files.map((file) => <article key={file.id}><span>📎</span><div><b>{file.name}</b><small>{formatSize(file.size)} · {file.section}</small></div><button onClick={() => onDownload(file)}>下载</button><button className="danger" onClick={() => onRemove(file)}>删除</button></article>)}{!files.length && <div className="empty-files">这个节点还没有上传文件</div>}</div></div></div>;
-}
-
-function ProjectDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (project: Project) => void }) {
-  const [name, setName] = useState("新项目计划");
-  const [start, setStart] = useState(() => dateString(new Date().getTime()));
-  const [end, setEnd] = useState(() => dateString(new Date().getTime() + 180 * DAY));
-  const [categories, setCategories] = useState(["Thinking", "Doing", "Acting"]);
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal project-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><small>NEW PROJECT</small><h2>创建一张干净的项目画布</h2></div><button onClick={onClose}>×</button></header><label>项目名称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label><div className="form-row"><label>项目开始<input type="date" value={start} onChange={(event) => setStart(event.target.value)} /></label><label>项目结束<input type="date" value={end} min={start} onChange={(event) => setEnd(event.target.value)} /></label></div><label>事件分类</label>{categories.map((category, index) => <div className="category-edit" key={index}><i style={{ background: COLORS[index % COLORS.length] }} /><input value={category} onChange={(event) => setCategories((items) => items.map((item, i) => i === index ? event.target.value : item))} /><button disabled={categories.length <= 1} onClick={() => setCategories((items) => items.filter((_, i) => i !== index))}>删除</button></div>)}<button className="text-button" onClick={() => setCategories((items) => [...items, `分类 ${items.length + 1}`])}>＋ 添加分类</button><footer><button className="btn" onClick={onClose}>取消</button><button className="btn primary" disabled={!name.trim() || parseDate(end) <= parseDate(start)} onClick={() => onCreate(blankProject(name.trim(), start, end, categories.filter(Boolean)))}>创建空白项目</button></footer><small className="migration-note">新版使用独立数据空间，旧测试数据不会进入新项目。</small></div></div>;
 }
