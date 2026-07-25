@@ -94,6 +94,7 @@ const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 5;
 const START_ID = "__project_start__";
 const END_ID = "__project_end__";
+const APP_VERSION = "公测版 v0.3.0";
 const PROJECTS_KEY = "planthrough-projects-v2";
 const CURRENT_KEY = "planthrough-current-v2";
 const COLORS = ["#2f73ff", "#25a878", "#8b68e8", "#e59a24", "#df5f72", "#299bb4"];
@@ -124,7 +125,7 @@ function blankProject(name = "未命名项目", start?: string, end?: string, ca
   const now = new Date();
   const s = start || dateString(now.getTime());
   const defaultEnd = new Date(now);
-  defaultEnd.setFullYear(defaultEnd.getFullYear() + 3);
+  defaultEnd.setFullYear(defaultEnd.getFullYear() + 1);
   const e = end || dateString(defaultEnd.getTime());
   const stamp = new Date().toISOString();
   return {
@@ -355,6 +356,7 @@ export default function PlanTool() {
   const [linkSource, setLinkSource] = useState<string | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(true);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [uploadSection, setUploadSection] = useState<WorkingSection>("content");
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -1074,6 +1076,7 @@ export default function PlanTool() {
         <button className="brand" onClick={() => setOverviewOpen((value) => !value)} aria-label="打开项目总览">
           <span className="brand-mark">P↘</span><span><b>PlanThrough</b><small>一张图，无限穿透</small></span>
         </button>
+        <span className="beta-badge" title="当前为公开体验版本，欢迎提交使用意见">{APP_VERSION}</span>
         <nav className="canvas-tools" aria-label="画布工具">
           <button className={tool === "node" ? "active" : ""} onClick={() => toggleCanvasTool("node")}>＋ 新建节点</button>
           <button className={tool === "logic" ? "active" : ""} onClick={() => toggleCanvasTool("logic")}>➜ 逻辑线</button>
@@ -1099,7 +1102,7 @@ export default function PlanTool() {
             setSelectedId(null);
             setFocusNodeId(null);
             setZoom(1);
-            setToast("已创建三年画布的新项目，双击顶部名称即可重命名");
+            setToast("已创建一年画布的新项目，双击顶部名称即可重命名");
           }}>＋ 新项目</button>
           <button className="btn" onClick={() => importRef.current?.click()}>导入</button>
           <button className="btn" onClick={exportProject}>导出</button>
@@ -1117,7 +1120,7 @@ export default function PlanTool() {
 
       <section className={`workspace ${overviewOpen ? "with-overview" : ""} ${selected ? "with-editor" : ""}`}>
         {overviewOpen
-          ? <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} onProjectChange={setProject} onHelp={() => setHelpOpen(true)} />
+          ? <Overview project={project} activePath={activePath} onClose={() => setOverviewOpen(false)} onProjectChange={setProject} onHelp={() => setHelpOpen(true)} onFeedback={() => setFeedbackOpen(true)} />
           : <button className="overview-reopen" onClick={() => setOverviewOpen(true)}>项目总览 ›</button>}
         <div className="canvas-scroll" ref={canvasRef} onPointerDown={canvasPointerDown}>
           <footer className={`floating-timeline ${floatingAxis.frame ? "local" : "global"}`} style={{ width: canvasWidth }}>
@@ -1145,7 +1148,7 @@ export default function PlanTool() {
             }}>
               <i /> <b>{project.status === "completed" ? "已完成" : "终点"}</b>
             </div>
-            <div className="start-end-line" style={{ left: 50, width: canvasWidth - 100, top: anchorTop + 17 }} /></>}
+            </>}
 
             {layout.frames.filter((frame) => !focusVisibleIds || focusVisibleIds.has(frame.nodeId)).map((frame) => (
               <div className={`child-frame level-${frame.level}`} key={frame.nodeId} style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}>
@@ -1266,6 +1269,7 @@ export default function PlanTool() {
       <input ref={uploadRef} hidden type="file" multiple onChange={uploadFiles} accept=".doc,.docx,.pdf,.ppt,.pptx,.xls,.xlsx,.txt,.png,.jpg,.jpeg,.zip" />
       {filesOpen && selected && <FileDialog files={nodeFiles} node={selected} onClose={() => setFilesOpen(false)} onDownload={downloadFile} onRemove={removeFile} />}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+      {feedbackOpen && <FeedbackDialog project={project} onClose={() => setFeedbackOpen(false)} />}
       {tooltip && <div className="line-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>{tooltip.text}</div>}
       {approvalTooltip && approvalNode && <div className="approval-tooltip" role="tooltip" style={{ left: approvalTooltip.x, top: approvalTooltip.y }}>
         <header><div><small>{displayNumber(project, approvalNode)} · 审批流程</small><b>{approvalNode.title}</b></div><span>{approvalNode.working.approvals.filter((step) => step.status === "approved").length}/{approvalNode.working.approvals.length} 已通过</span></header>
@@ -1279,12 +1283,13 @@ export default function PlanTool() {
   );
 }
 
-function Overview({ project, activePath, onClose, onProjectChange, onHelp }: {
+function Overview({ project, activePath, onClose, onProjectChange, onHelp, onFeedback }: {
   project: Project;
   activePath: PlanNode[];
   onClose: () => void;
   onProjectChange: (value: Project | ((current: Project) => Project)) => void;
   onHelp: () => void;
+  onFeedback: () => void;
 }) {
   const levels = [0, 1, 2].map((level) => project.nodes.filter((node) => nodeDepth(project, node) === level));
   const rate = (nodes: PlanNode[]) => nodes.length ? Math.round(nodes.reduce((sum, node) => sum + calculatedProgress(project, node), 0) / nodes.length) : 0;
@@ -1313,6 +1318,7 @@ function Overview({ project, activePath, onClose, onProjectChange, onHelp }: {
 
   return <aside className="overview-panel">
     <header><b>项目工作台</b><button onClick={onClose} title="收起左侧栏">‹</button></header>
+    <div className="beta-storage-note"><b>公开体验版</b><span>项目和附件默认只保存在当前浏览器。请勿上传机密文件，并定期导出项目备份。</span></div>
     <section>
       <h3>项目总览</h3>
       <dl><div><dt>项目周期</dt><dd>{Math.ceil((parseDate(project.end) - parseDate(project.start)) / DAY)} 天</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点</dt><dd>{nodes.length} 个</dd></div>)}</dl>
@@ -1337,7 +1343,10 @@ function Overview({ project, activePath, onClose, onProjectChange, onHelp }: {
     <section><h3>项目效率</h3><dl><div><dt>整体节点完成率</dt><dd>{rate(project.nodes)}%</dd></div>{levels.map((nodes, i) => <div key={i}><dt>{i + 1} 级节点完成率</dt><dd>{rate(nodes)}%</dd></div>)}</dl></section>
     <section className="current-path"><h3>当前节点</h3>{[0, 1, 2].map((level) => { const node = activePath.find((item) => nodeDepth(project, item) === level); return <p key={level}><b>{level + 1}级</b><span>{node ? `${displayNumber(project, node)} · ${node.title}` : "—"}</span></p>; })}<p><b>审批</b><span>{approvalText}</span></p></section>
     <section className="canvas-key"><h3>图例</h3><p><i className="node-swatch root" />一级节点</p><p><i className="node-swatch child" />二级节点</p><p><i className="node-swatch grandchild" />三级节点</p><p><i className="line-swatch logic" />逻辑线（执行顺序）</p><p><i className="line-swatch relation" />关系线（仅关联）</p><p><i className="line-swatch parallel" />并发时间线</p><p><i className="line-swatch today" />当前日期线</p><hr /><p><i className="status-dot pending" />未执行</p><p><i className="status-dot active" />当前任务</p><p><i className="status-dot completed" />已完成</p></section>
-    <button className="workspace-help-button" onClick={onHelp}><span>?</span>帮助</button>
+    <div className="workspace-corner-actions">
+      <button className="workspace-feedback-button" onClick={onFeedback}><span>✦</span>意见反馈</button>
+      <button className="workspace-help-button" onClick={onHelp}><span>?</span>帮助</button>
+    </div>
   </aside>;
 }
 
@@ -1415,6 +1424,82 @@ function FileDialog({ files, node, onClose, onDownload, onRemove }: { files: Att
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal files-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><small>节点附件</small><h2>{node.title}</h2></div><button onClick={onClose}>×</button></header><p>共 {files.length} 个文件</p><div className="file-list">{files.map((file) => <article key={file.id}><span>📎</span><div><b>{file.name}</b><small>{formatSize(file.size)} · {file.section}</small></div><button onClick={() => onDownload(file)}>下载</button><button className="danger" onClick={() => onRemove(file)}>删除</button></article>)}{!files.length && <div className="empty-files">这个节点还没有上传文件</div>}</div></div></div>;
 }
 
+function FeedbackDialog({ project, onClose }: { project: Project; onClose: () => void }) {
+  const [category, setCategory] = useState("功能建议");
+  const [description, setDescription] = useState("");
+  const [expected, setExpected] = useState("");
+  const [contact, setContact] = useState("");
+  const [screenshot, setScreenshot] = useState<File | null>(null);
+  const [consented, setConsented] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  const submit = async () => {
+    if (description.trim().length < 5) {
+      setMessage("请至少填写 5 个字的问题描述。");
+      return;
+    }
+    if (!consented) {
+      setMessage("请先确认反馈内容可以提交。");
+      return;
+    }
+    if (screenshot && screenshot.size > 5 * 1024 * 1024) {
+      setMessage("截图不能超过 5MB。");
+      return;
+    }
+
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const form = new FormData();
+      form.set("category", category);
+      form.set("description", description);
+      form.set("expected", expected);
+      form.set("contact", contact);
+      form.set("projectName", project.name);
+      form.set("appVersion", APP_VERSION);
+      form.set("pageUrl", window.location.href);
+      form.set("userAgent", navigator.userAgent);
+      form.set("viewport", `${window.innerWidth}×${window.innerHeight}`);
+      if (screenshot) form.set("screenshot", screenshot);
+
+      const response = await fetch("/api/feedback", { method: "POST", body: form });
+      const payload = await response.json() as { message?: string; error?: string };
+      if (!response.ok) throw new Error(payload.error || "提交失败，请稍后重试。");
+      setSubmitted(true);
+      setMessage(payload.message || "感谢反馈，我们已经收到。");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "提交失败，请稍后重试。");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return <div className="modal-backdrop" onMouseDown={onClose}>
+    <div className="modal feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title" onMouseDown={(event) => event.stopPropagation()}>
+      <header>
+        <div><small>{APP_VERSION}</small><h2 id="feedback-title">意见反馈</h2></div>
+        <button onClick={onClose} aria-label="关闭意见反馈">×</button>
+      </header>
+      {submitted
+        ? <div className="feedback-success"><span>✓</span><h3>反馈已提交</h3><p>{message}</p><button className="btn primary" onClick={onClose}>完成</button></div>
+        : <>
+          <div className="feedback-intro"><b>感谢参与 PlanThrough 公开体验</b><p>你的意见会直接帮助我们改进操作流程、节点表现和项目执行体验。</p></div>
+          <label>反馈类型<select value={category} onChange={(event) => setCategory(event.target.value)}><option>功能建议</option><option>操作困难</option><option>显示问题</option><option>程序错误</option><option>其他</option></select></label>
+          <label>问题描述 <em>*</em><textarea autoFocus minLength={5} maxLength={3000} placeholder="请说明你做了什么、看到了什么，以及问题出现在哪个节点或步骤。" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+          <label>期望效果<textarea maxLength={2000} placeholder="你希望它应该如何工作？" value={expected} onChange={(event) => setExpected(event.target.value)} /></label>
+          <label>联系方式（选填）<input maxLength={200} placeholder="微信、邮箱或其他方便联系你的方式" value={contact} onChange={(event) => setContact(event.target.value)} /></label>
+          <label className="feedback-upload">问题截图（选填，最大 5MB）<input type="file" accept="image/*" onChange={(event) => { setScreenshot(event.target.files?.[0] || null); setMessage(""); }} />{screenshot && <span>{screenshot.name} · {formatSize(screenshot.size)}</span>}</label>
+          <div className="feedback-context"><b>将自动附带</b><span>当前项目名称、应用版本、浏览器类型和窗口尺寸。不会提交项目节点内容或本地附件。</span></div>
+          <label className="feedback-consent"><input type="checkbox" checked={consented} onChange={(event) => setConsented(event.target.checked)} /><span>我确认反馈和所选截图不包含机密、个人隐私或无权分享的信息。</span></label>
+          {message && <div className="feedback-error">{message}</div>}
+          <footer><button className="btn" onClick={onClose}>取消</button><button className="btn primary" disabled={submitting || !consented} onClick={() => void submit()}>{submitting ? "正在提交…" : "提交反馈"}</button></footer>
+        </>}
+    </div>
+  </div>;
+}
+
 function HelpDialog({ onClose }: { onClose: () => void }) {
   return <div className="modal-backdrop" onMouseDown={onClose}>
     <div className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -1446,7 +1531,7 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
         <section className="help-section wide">
           <h3>推荐使用流程</h3>
           <ol className="help-steps">
-            <li><b>建立项目：</b>点击“新项目”。新项目默认创建三年周期，可在左侧“项目总览”的日期区域双击修改起止日期。</li>
+            <li><b>建立项目：</b>点击“新项目”。新项目默认创建一年周期，可在左侧“项目总览”的日期区域双击修改起止日期。</li>
             <li><b>建立骨架：</b>点击“新建节点”，再点击画布创建一级节点；双击节点名称可重命名。</li>
             <li><b>调整时间与分类：</b>拖动节点可修改时间位置和 Thinking / Doing / Acting 分类；拖动节点左右边缘可调整开始、结束日期。</li>
             <li><b>拆解任务：</b>点击节点的小三角展开，再通过 Working 面板添加子节点。一级、二级节点即使暂时没有子节点也可先展开。</li>
